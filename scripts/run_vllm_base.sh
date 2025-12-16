@@ -82,7 +82,7 @@ HF_CACHE_DIR="${HF_CACHE_DIR:-$HOME/.cache/huggingface}"
 
 # Model Hub Selection
 # MODEL_HUB: "huggingface" (default) or "modelscope"
-MODEL_HUB="${MODEL_HUB:-modelscope}"
+MODEL_HUB="${MODEL_HUB:-huggingface}"
 
 # ModelScope cache directory
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
@@ -151,9 +151,9 @@ if [ "$MODEL_HUB" = "modelscope" ]; then
     # Use local ModelScope cache path
     MODEL_PATH="/root/.cache/modelscope/hub/models/$MODEL_ORG/$MODEL_NAME"
     echo "Using ModelScope local path: $MODEL_PATH"
-    VLLM_BASE_CMD="vllm serve $MODEL_PATH --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --enable-auto-tool-choice --tool-call-parser hermes"
+    VLLM_BASE_CMD="vllm serve $MODEL_PATH --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --limit-mm-per-prompt '{\"image\":16,\"video\":0}' --enable-auto-tool-choice --tool-call-parser hermes"
 else
-    VLLM_BASE_CMD="vllm serve $BASE_MODEL --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --enable-auto-tool-choice --tool-call-parser hermes"
+    VLLM_BASE_CMD="vllm serve $BASE_MODEL --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --limit-mm-per-prompt '{\"image\":16,\"video\":0}' --enable-auto-tool-choice --tool-call-parser hermes"
 fi
 
 # Add trust-remote-code flag if enabled
