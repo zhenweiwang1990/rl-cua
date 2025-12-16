@@ -7,7 +7,7 @@ echo "=========================================="
 echo ""
 
 # Default values - Using Qwen3-VL for CUA
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-8B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-32B-A3B-Instruct}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 GPU_DEVICES="${GPU_DEVICES:-all}"
@@ -152,7 +152,7 @@ HF_CACHE_DIR="${HF_CACHE_DIR:-$HOME/.cache/huggingface}"
 
 # Model Hub Selection
 # MODEL_HUB: "huggingface" (default) or "modelscope"
-MODEL_HUB="${MODEL_HUB:-modelscope}"
+MODEL_HUB="${MODEL_HUB:-huggingface}"
 
 # ModelScope cache directory
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
