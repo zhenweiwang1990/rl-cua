@@ -386,6 +386,12 @@ if [ "$TRUST_REMOTE_CODE" = "true" ]; then
     VLLM_BASE_CMD="$VLLM_BASE_CMD --trust-remote-code"
 fi
 
+# Enable auto tool choice for function calling support
+# This is required when using tool_choice="auto" in API requests
+VLLM_BASE_CMD="$VLLM_BASE_CMD --enable-auto-tool-choice"
+# Use json parser for tool calls (works with Qwen models)
+VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser json"
+
 # Build the command string
 # Check if model requires newer transformers (Qwen3-VL)
 if [[ "$BASE_MODEL" == *"Qwen3-VL"* ]] || [[ "$BASE_MODEL" == *"Qwen2.5-VL"* ]]; then
