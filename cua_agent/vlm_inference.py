@@ -1,7 +1,7 @@
-"""VLM (Vision-Language Model) inference module using vLLM.
+"""VLM (Vision-Language Model) inference module.
 
 This module provides inference capabilities for the Qwen3-VL model
-using vLLM for efficient GPU inference.
+using vLLM or OpenRouter API.
 """
 
 import base64
@@ -18,18 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class VLMInference:
-    """Vision-Language Model inference using vLLM.
+    """Vision-Language Model inference.
     
-    Supports two modes:
-    1. Server mode: Connect to a running vLLM server via OpenAI-compatible API
-    2. Local mode: Load model directly (requires more GPU memory)
+    Supports multiple providers:
+    1. vLLM server mode: Connect to a running vLLM server via OpenAI-compatible API
+    2. vLLM local mode: Load model directly (requires more GPU memory)
+    3. OpenRouter: Use OpenRouter API for inference
     """
     
     def __init__(
         self,
-        model_name: str = "unsloth/Qwen3-VL-32B-Instruct",
+        model_name: str = "unsloth/Qwen3-VL-30B-A3B-Instruct",
+        provider: str = "vllm",
         api_base: Optional[str] = None,
-        api_key: str = "EMPTY",
+        api_key: Optional[str] = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
         top_p: float = 0.9,
@@ -38,13 +40,15 @@ class VLMInference:
         
         Args:
             model_name: Model name/path
-            api_base: vLLM server base URL (e.g., "http://localhost:8000/v1")
-            api_key: API key (default "EMPTY" for local vLLM)
+            provider: Provider to use ("vllm" or "openrouter")
+            api_base: API base URL (for vLLM server or OpenRouter)
+            api_key: API key (required for OpenRouter, "EMPTY" for local vLLM)
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             top_p: Top-p sampling
         """
         self.model_name = model_name
+        self.provider = provider.lower()
         self.api_base = api_base
         self.api_key = api_key
         self.max_tokens = max_tokens
@@ -55,14 +59,37 @@ class VLMInference:
         self._tokenizer = None
         self._client = None
         
-        if api_base:
-            # Server mode
+        # Validate provider
+        if self.provider not in ["vllm", "openrouter"]:
+            raise ValueError(f"Invalid provider: {provider}. Must be 'vllm' or 'openrouter'")
+        
+        # Setup API client based on provider
+        if self.provider == "openrouter":
+            if not api_base:
+                api_base = "https://openrouter.ai/api/v1"
+            if not api_key:
+                raise ValueError("api_key is required when using OpenRouter provider")
+            self.api_base = api_base
             self._client = httpx.AsyncClient(
                 base_url=api_base,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "HTTP-Referer": "https://github.com/rl-cua",  # Optional: for OpenRouter
+                    "X-Title": "CUA Agent",  # Optional: for OpenRouter
+                },
                 timeout=300.0,
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
             )
+            logger.info(f"Initialized OpenRouter client: {api_base}")
+        elif self.provider == "vllm" and api_base:
+            # vLLM server mode
+            self._client = httpx.AsyncClient(
+                base_url=api_base,
+                headers={"Authorization": f"Bearer {api_key or 'EMPTY'}"},
+                timeout=300.0,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            )
+            logger.info(f"Initialized vLLM server client: {api_base}")
     
     async def _ensure_local_model(self):
         """Lazily load local model if not using server mode."""
@@ -115,7 +142,7 @@ class VLMInference:
         tools: Optional[List[Dict[str, Any]]] = None,
         image_data: Optional[bytes] = None,
         temperature: Optional[float] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         """Generate a response from the VLM.
         
         Args:
@@ -125,13 +152,15 @@ class VLMInference:
             temperature: Override temperature
             
         Returns:
-            Tuple of (raw_response, parsed_response)
+            Tuple of (raw_response, parsed_response, usage_info)
+            usage_info contains: prompt_tokens, completion_tokens, total_tokens, model, etc.
         """
-        if self.api_base:
+        if self.provider == "openrouter" or (self.provider == "vllm" and self.api_base):
             return await self._generate_server(
                 messages, tools, image_data, temperature
             )
         else:
+            # vLLM local mode
             return await self._generate_local(
                 messages, tools, image_data, temperature
             )
@@ -142,8 +171,8 @@ class VLMInference:
         tools: Optional[List[Dict[str, Any]]] = None,
         image_data: Optional[bytes] = None,
         temperature: Optional[float] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
-        """Generate using vLLM server API.
+    ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """Generate using server API (vLLM or OpenRouter).
         
         Args:
             messages: Conversation messages
@@ -152,7 +181,7 @@ class VLMInference:
             temperature: Override temperature
             
         Returns:
-            Tuple of (raw_response, parsed_response)
+            Tuple of (raw_response, parsed_response, usage_info)
         """
         if not self._client:
             raise RuntimeError("Client not initialized")
@@ -182,8 +211,42 @@ class VLMInference:
             else:
                 api_messages.append(msg)
         
+        # Map model name for OpenRouter if needed
+        model_name = self.model_name
+        if self.provider == "openrouter":
+            # OpenRouter model name mapping
+            # Map HuggingFace/ModelScope model names to OpenRouter model names
+            # Note: OpenRouter model IDs are case-sensitive and use lowercase
+            model_mapping = {
+                # Qwen3-VL-30B-A3B (recommended - available on OpenRouter)
+                "unsloth/Qwen3-VL-30B-A3B-Instruct": "qwen/qwen3-vl-30b-a3b-instruct",
+                "Qwen3-VL-30B-A3B-Instruct": "qwen/qwen3-vl-30b-a3b-instruct",
+                "qwen/Qwen3-VL-30B-A3B-Instruct": "qwen/qwen3-vl-30b-a3b-instruct",
+                "Qwen/Qwen3-VL-30B-A3B-Instruct": "qwen/qwen3-vl-30b-a3b-instruct",
+                # Qwen3-VL-32B (may be unavailable on OpenRouter)
+                "unsloth/Qwen3-VL-32B-Instruct": "qwen/qwen3-vl-32b-instruct",
+                "Qwen3-VL-32B-Instruct": "qwen/qwen3-vl-32b-instruct",
+                "qwen/Qwen3-VL-32B-Instruct": "qwen/qwen3-vl-32b-instruct",
+                "Qwen/Qwen3-VL-32B-Instruct": "qwen/qwen3-vl-32b-instruct",
+                # Qwen3-VL-8B (alternative smaller model)
+                "unsloth/Qwen3-VL-8B-Instruct": "qwen/qwen3-vl-8b-instruct",
+                "Qwen3-VL-8B-Instruct": "qwen/qwen3-vl-8b-instruct",
+                "qwen/Qwen3-VL-8B-Instruct": "qwen/qwen3-vl-8b-instruct",
+                "Qwen/Qwen3-VL-8B-Instruct": "qwen/qwen3-vl-8b-instruct",
+                # Qwen2.5-VL models
+                "Qwen/Qwen2.5-VL-32B-Instruct": "qwen/qwen2.5-vl-32b-instruct",
+                "qwen/Qwen2.5-VL-32B-Instruct": "qwen/qwen2.5-vl-32b-instruct",
+            }
+            model_name = model_mapping.get(model_name, model_name)
+            # If model name still contains "/", assume it's already in OpenRouter format
+            if "/" in model_name and model_name not in model_mapping.values():
+                # Convert to lowercase for OpenRouter format (e.g., qwen/qwen3-vl-32b-instruct)
+                parts = model_name.split("/")
+                if len(parts) == 2:
+                    model_name = f"{parts[0].lower()}/{parts[1].lower()}"
+        
         payload = {
-            "model": self.model_name,
+            "model": model_name,
             "messages": api_messages,
             "max_tokens": self.max_tokens,
             "temperature": temperature or self.temperature,
@@ -198,17 +261,43 @@ class VLMInference:
             response = await self._client.post("/chat/completions", json=payload)
             response.raise_for_status()
         except httpx.ReadError as e:
-            logger.error(f"Failed to read from vLLM server at {self.api_base}: {e}")
+            provider_name = "OpenRouter" if self.provider == "openrouter" else "vLLM"
+            logger.error(f"Failed to read from {provider_name} server at {self.api_base}: {e}")
             raise RuntimeError(
-                f"Cannot connect to vLLM server at {self.api_base}. "
-                f"Please ensure the server is running and accessible. "
-                f"If not using server mode, set VLLM_API_BASE to empty or None."
+                f"Cannot connect to {provider_name} server at {self.api_base}. "
+                f"Please ensure the server is running and accessible."
             ) from e
         except httpx.ConnectError as e:
-            logger.error(f"Failed to connect to vLLM server at {self.api_base}: {e}")
+            provider_name = "OpenRouter" if self.provider == "openrouter" else "vLLM"
+            logger.error(f"Failed to connect to {provider_name} server at {self.api_base}: {e}")
             raise RuntimeError(
-                f"Cannot connect to vLLM server at {self.api_base}. "
-                f"Please check if the server is running."
+                f"Cannot connect to {provider_name} server at {self.api_base}. "
+                f"Please check if the server is running and accessible."
+            ) from e
+        except httpx.HTTPStatusError as e:
+            provider_name = "OpenRouter" if self.provider == "openrouter" else "vLLM"
+            error_detail = ""
+            try:
+                error_body = e.response.json()
+                error_detail = f": {error_body}"
+                
+                # Provide helpful error message for OpenRouter 404
+                if self.provider == "openrouter" and e.response.status_code == 404:
+                    error_msg = error_body.get("error", {}).get("message", "")
+                    if "No endpoints found" in error_msg:
+                        logger.error(
+                            f"Model '{model_name}' is not available on OpenRouter. "
+                            f"This may mean:\n"
+                            f"  1. The model is temporarily unavailable\n"
+                            f"  2. The model name is incorrect\n"
+                            f"  3. You need to check available models at https://openrouter.ai/models\n"
+                            f"  Try using an alternative model like 'qwen/qwen2.5-vl-32b-instruct' or 'qwen/qwen3-vl-8b-instruct'"
+                        )
+            except:
+                error_detail = f": {e.response.text}"
+            logger.error(f"{provider_name} API error: {e.response.status_code}{error_detail}")
+            raise RuntimeError(
+                f"{provider_name} API error: {e.response.status_code}{error_detail}"
             ) from e
         
         result = response.json()
@@ -223,7 +312,21 @@ class VLMInference:
             "tool_calls": message.get("tool_calls"),
         }
         
-        return raw_content, parsed
+        # Extract usage information
+        usage_info = {
+            "prompt_tokens": result.get("usage", {}).get("prompt_tokens", 0),
+            "completion_tokens": result.get("usage", {}).get("completion_tokens", 0),
+            "total_tokens": result.get("usage", {}).get("total_tokens", 0),
+            "model": result.get("model", self.model_name),
+            "finish_reason": choice.get("finish_reason", "unknown"),
+        }
+        
+        # OpenRouter specific fields
+        if self.provider == "openrouter":
+            usage_info["prompt_tokens_details"] = result.get("usage", {}).get("prompt_tokens_details", {})
+            usage_info["completion_tokens_details"] = result.get("usage", {}).get("completion_tokens_details", {})
+        
+        return raw_content, parsed, usage_info
     
     async def _generate_local(
         self,
@@ -231,7 +334,7 @@ class VLMInference:
         tools: Optional[List[Dict[str, Any]]] = None,
         image_data: Optional[bytes] = None,
         temperature: Optional[float] = None,
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         """Generate using local vLLM model.
         
         Args:
@@ -241,7 +344,7 @@ class VLMInference:
             temperature: Override temperature
             
         Returns:
-            Tuple of (raw_response, parsed_response)
+            Tuple of (raw_response, parsed_response, usage_info)
         """
         await self._ensure_local_model()
         
@@ -291,7 +394,17 @@ class VLMInference:
         # Parse tool calls
         parsed = self._parse_tool_calls(raw_content)
         
-        return raw_content, parsed
+        # Extract usage information from vLLM output
+        usage_info = {
+            "prompt_tokens": len(outputs[0].prompt_token_ids) if hasattr(outputs[0], "prompt_token_ids") else 0,
+            "completion_tokens": len(outputs[0].outputs[0].token_ids) if hasattr(outputs[0].outputs[0], "token_ids") else 0,
+            "total_tokens": 0,
+            "model": self.model_name,
+            "finish_reason": outputs[0].outputs[0].finish_reason if hasattr(outputs[0].outputs[0], "finish_reason") else "unknown",
+        }
+        usage_info["total_tokens"] = usage_info["prompt_tokens"] + usage_info["completion_tokens"]
+        
+        return raw_content, parsed, usage_info
     
     def _parse_tool_calls(self, response: str) -> Dict[str, Any]:
         """Parse tool calls from model response.
@@ -354,6 +467,24 @@ class VLMInference:
             pass
         
         return result
+    
+    async def list_available_models(self) -> List[Dict[str, Any]]:
+        """List available models from OpenRouter (OpenRouter only).
+        
+        Returns:
+            List of available model dictionaries
+        """
+        if self.provider != "openrouter" or not self._client:
+            raise ValueError("list_available_models is only available for OpenRouter provider")
+        
+        try:
+            response = await self._client.get("/models")
+            response.raise_for_status()
+            data = response.json()
+            return data.get("data", [])
+        except Exception as e:
+            logger.error(f"Failed to list models from OpenRouter: {e}")
+            raise
     
     async def close(self):
         """Close the client."""

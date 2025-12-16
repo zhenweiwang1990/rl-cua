@@ -3,11 +3,13 @@
 # Usage: ./run_agent.sh "Task description"
 # 
 # Environment variables:
-#   GBOX_API_KEY      - GBox API key (required)
-#   VLLM_API_BASE     - vLLM server URL (optional, for server mode)
-#   MODEL_NAME        - Model name (default: unsloth/Qwen3-VL-32B-Instruct)
-#   BOX_TYPE          - Box type (default: android)
-#   MAX_TURNS         - Maximum turns (default: 20)
+#   GBOX_API_KEY         - GBox API key (required)
+#   VLM_PROVIDER         - VLM provider: "vllm" or "openrouter" (default: vllm)
+#   VLLM_API_BASE        - vLLM server URL (optional, for server mode)
+#   OPENROUTER_API_KEY   - OpenRouter API key (required if VLM_PROVIDER=openrouter)
+#   MODEL_NAME           - Model name (default: unsloth/Qwen3-VL-30B-A3B-Instruct)
+#   BOX_TYPE             - Box type (default: android)
+#   MAX_TURNS            - Maximum turns (default: 20)
 
 set -e
 
@@ -21,13 +23,15 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Options:"
     echo "  --box-type, -b     Box type (android, linux). Default: android"
-    echo "  --model            Model name. Default: unsloth/Qwen3-VL-32B-Instruct"
+    echo "  --model            Model name. Default: unsloth/Qwen3-VL-30B-A3B-Instruct"
     echo "  --max-turns        Maximum turns. Default: 20"
     echo "  --verbose, -v      Enable verbose output"
     echo ""
     echo "Environment variables:"
-    echo "  GBOX_API_KEY       GBox API key (required)"
-    echo "  VLLM_API_BASE      vLLM server URL (optional)"
+    echo "  GBOX_API_KEY         GBox API key (required)"
+    echo "  VLM_PROVIDER         VLM provider: 'vllm' or 'openrouter' (default: vllm)"
+    echo "  VLLM_API_BASE        vLLM server URL (optional, for vllm provider)"
+    echo "  OPENROUTER_API_KEY   OpenRouter API key (required if VLM_PROVIDER=openrouter)"
     exit 1
 fi
 
@@ -55,7 +59,7 @@ fi
 
 # Default values
 BOX_TYPE="${BOX_TYPE:-android}"
-MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}"
+MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-30B-A3B-Instruct}"
 MAX_TURNS="${MAX_TURNS:-20}"
 
 # Build command
@@ -69,6 +73,14 @@ if [ -n "$VLLM_API_BASE" ]; then
     CMD+=" --vllm-api-base $VLLM_API_BASE"
 fi
 
+if [ -n "$VLM_PROVIDER" ]; then
+    CMD+=" --vlm-provider $VLM_PROVIDER"
+fi
+
+if [ -n "$OPENROUTER_API_KEY" ]; then
+    CMD+=" --openrouter-api-key $OPENROUTER_API_KEY"
+fi
+
 # Pass through remaining arguments
 CMD+=" $@"
 
@@ -76,6 +88,9 @@ echo "Starting CUA Agent..."
 echo "Task: $TASK"
 echo "Box Type: $BOX_TYPE"
 echo "Model: $MODEL_NAME"
+echo "VLM Provider: ${VLM_PROVIDER:-vllm}"
+[ -n "$VLLM_API_BASE" ] && echo "vLLM API Base: $VLLM_API_BASE" || echo "vLLM API Base: (not set, will use local model)"
+[ -n "$OPENROUTER_API_KEY" ] && echo "OpenRouter API Key: ${OPENROUTER_API_KEY:0:10}..." || echo "OpenRouter API Key: (not set)"
 echo ""
 
 eval $CMD

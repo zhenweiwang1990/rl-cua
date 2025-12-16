@@ -17,7 +17,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - GBOX_API_KEY=${GBOX_API_KEY}
       - VLLM_API_BASE=${VLLM_API_BASE:-}
-      - MODEL_NAME=${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}
+      - MODEL_NAME=${MODEL_NAME:-unsloth/Qwen3-VL-30B-A3B-Instruct}
       - BOX_TYPE=${BOX_TYPE:-android}
       - MAX_TURNS=${MAX_TURNS:-20}
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}

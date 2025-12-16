@@ -29,9 +29,11 @@ async def run_agent(
     box_type: str = "android",
     vllm_api_base: str | None = None,
     gbox_api_key: str | None = None,
-    model_name: str = "unsloth/Qwen3-VL-32B-Instruct",
+    model_name: str = "unsloth/Qwen3-VL-30B-A3B-Instruct",
     max_turns: int = 20,
     verbose: bool = False,
+    vlm_provider: str | None = None,
+    openrouter_api_key: str | None = None,
 ) -> dict:
     """Run the CUA agent on a task.
     
@@ -43,6 +45,8 @@ async def run_agent(
         model_name: Model name
         max_turns: Maximum turns
         verbose: Enable verbose output
+        vlm_provider: VLM provider ("vllm" or "openrouter")
+        openrouter_api_key: OpenRouter API key (required if vlm_provider=openrouter)
         
     Returns:
         Result dictionary
@@ -55,16 +59,36 @@ async def run_agent(
                 "GBOX_API_KEY not provided. Set it via --gbox-api-key or GBOX_API_KEY env var"
             )
     
+    # Determine VLM provider from args or environment
+    if not vlm_provider:
+        vlm_provider = os.getenv("VLM_PROVIDER", "vllm").lower()
+    
+    # Get OpenRouter API key if needed
+    if vlm_provider == "openrouter":
+        if not openrouter_api_key:
+            openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not openrouter_api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required when using OpenRouter provider. "
+                "Get your API key from https://openrouter.ai"
+            )
+    
     # Create config
     gbox_config = GBoxConfig(
         api_key=gbox_api_key,
         box_type=box_type,
     )
     
+    # Get OpenRouter API base from environment if not provided
+    openrouter_api_base = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+    
     config = CUAConfig(
         model_name=model_name,
         max_turns=max_turns,
+        vlm_provider=vlm_provider,
         vllm_api_base=vllm_api_base,
+        openrouter_api_key=openrouter_api_key,
+        openrouter_api_base=openrouter_api_base,
         gbox=gbox_config,
     )
     
@@ -130,8 +154,8 @@ Examples:
     )
     parser.add_argument(
         "--model",
-        default="unsloth/Qwen3-VL-32B-Instruct",
-        help="Model name (default: unsloth/Qwen3-VL-32B-Instruct)",
+        default="unsloth/Qwen3-VL-30B-A3B-Instruct",
+        help="Model name (default: unsloth/Qwen3-VL-30B-A3B-Instruct)",
     )
     parser.add_argument(
         "--max-turns",
@@ -143,6 +167,17 @@ Examples:
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output",
+    )
+    parser.add_argument(
+        "--vlm-provider",
+        choices=["vllm", "openrouter"],
+        help="VLM provider: 'vllm' (local vLLM server) or 'openrouter' (OpenRouter API). "
+             "Can also be set via VLM_PROVIDER env var (default: vllm)",
+    )
+    parser.add_argument(
+        "--openrouter-api-key",
+        help="OpenRouter API key (required if --vlm-provider=openrouter). "
+             "Can also be set via OPENROUTER_API_KEY env var",
     )
     
     args = parser.parse_args()
@@ -161,6 +196,8 @@ Examples:
             model_name=args.model,
             max_turns=args.max_turns,
             verbose=args.verbose,
+            vlm_provider=args.vlm_provider,
+            openrouter_api_key=args.openrouter_api_key,
         ))
         
         print("\n" + "="*60)

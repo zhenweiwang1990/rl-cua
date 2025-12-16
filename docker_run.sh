@@ -25,25 +25,49 @@ if [ $# -lt 1 ]; then
     echo ""
     echo "Options:"
     echo "  --box-type, -b     Box type (android, linux). Default: android"
-    echo "  --model            Model name. Default: unsloth/Qwen3-VL-32B-Instruct"
+    echo "  --model            Model name. Default: unsloth/Qwen3-VL-30B-A3B-Instruct"
     echo "  --max-turns        Maximum turns. Default: 20"
     echo "  --verbose, -v      Enable verbose output"
     echo "  --image            Docker image name (default: cua-agent:latest)"
     echo "  --container-name   Container name (default: cua-agent-run)"
     echo ""
     echo "Environment variables:"
-    echo "  GBOX_API_KEY       GBox API key (required)"
-    echo "  VLLM_API_BASE      vLLM server URL (optional)"
+    echo "  GBOX_API_KEY         GBox API key (required)"
+    echo "  VLM_PROVIDER         VLM provider: 'vllm' or 'openrouter' (default: vllm)"
+    echo "  VLLM_API_BASE        vLLM server URL (optional, for vllm provider)"
+    echo "  OPENROUTER_API_KEY   OpenRouter API key (required if VLM_PROVIDER=openrouter)"
+    echo "  MODEL_NAME           Model name (default: unsloth/Qwen3-VL-30B-A3B-Instruct)"
     exit 1
 fi
 
 TASK="$1"
 shift
 
-# Parse arguments
+# Get script directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}")" && pwd )"
+
+# Load .env file if it exists (BEFORE setting defaults)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+    echo -e "${GREEN}✓ Loaded .env file${NC}"
+else
+    echo -e "${YELLOW}⚠️  No .env file found, using defaults${NC}"
+fi
+
+# Parse arguments (after loading .env, so command line args can override .env)
 BOX_TYPE="${BOX_TYPE:-android}"
-MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}"
+MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-30B-A3B-Instruct}"
 MAX_TURNS="${MAX_TURNS:-20}"
+
+# Debug: Show actual values being used
+if [ "${DEBUG:-0}" = "1" ]; then
+    echo -e "${BLUE}Debug: Environment variables${NC}"
+    echo "  MODEL_NAME from env: ${MODEL_NAME}"
+    echo "  VLM_PROVIDER from env: ${VLM_PROVIDER:-vllm}"
+    echo "  OPENROUTER_API_KEY set: $([ -n "$OPENROUTER_API_KEY" ] && echo 'yes' || echo 'no')"
+fi
 VERBOSE=""
 EXTRA_ARGS=""
 
@@ -80,16 +104,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Get script directory
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}")" && pwd )"
-
-# Load .env file if it exists
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    set -a
-    source "$SCRIPT_DIR/.env"
-    set +a
-fi
-
 # Check for GBOX_API_KEY
 if [ -z "$GBOX_API_KEY" ]; then
     echo -e "${RED}❌ Error: GBOX_API_KEY environment variable is not set${NC}"
@@ -112,6 +126,8 @@ echo "Task: $TASK"
 echo "Box Type: $BOX_TYPE"
 echo "Model: $MODEL_NAME"
 echo "Max Turns: $MAX_TURNS"
+echo "VLM Provider: ${VLM_PROVIDER:-vllm}"
+[ -n "$OPENROUTER_API_KEY" ] && echo "OpenRouter API Key: ${OPENROUTER_API_KEY:0:10}..." || echo "OpenRouter API Key: (not set)"
 echo ""
 
 # Build docker run command
@@ -127,7 +143,10 @@ DOCKER_CMD+=" --ulimit stack=67108864"
 DOCKER_CMD+=" -v \"$SCRIPT_DIR:/workspace\""
 DOCKER_CMD+=" -v \"$HOME/.cache/huggingface:/root/.cache/huggingface\""
 DOCKER_CMD+=" -e GBOX_API_KEY=\"$GBOX_API_KEY\""
+DOCKER_CMD+=" -e VLM_PROVIDER=\"${VLM_PROVIDER:-vllm}\""
 DOCKER_CMD+=" -e VLLM_API_BASE=\"${VLLM_API_BASE:-}\""
+DOCKER_CMD+=" -e OPENROUTER_API_KEY=\"${OPENROUTER_API_KEY:-}\""
+DOCKER_CMD+=" -e OPENROUTER_API_BASE=\"${OPENROUTER_API_BASE:-https://openrouter.ai/api/v1}\""
 DOCKER_CMD+=" -e MODEL_NAME=\"$MODEL_NAME\""
 DOCKER_CMD+=" -e BOX_TYPE=\"$BOX_TYPE\""
 DOCKER_CMD+=" -e MAX_TURNS=\"$MAX_TURNS\""

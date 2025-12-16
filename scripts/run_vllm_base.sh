@@ -7,11 +7,11 @@ echo "=========================================="
 echo ""
 
 # Default values - Using Qwen3-VL for CUA
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-32B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-8B-Instruct}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 GPU_DEVICES="${GPU_DEVICES:-all}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 CONTAINER_NAME="${CONTAINER_NAME:-vllm-cua-server}"
@@ -82,7 +82,7 @@ HF_CACHE_DIR="${HF_CACHE_DIR:-$HOME/.cache/huggingface}"
 
 # Model Hub Selection
 # MODEL_HUB: "huggingface" (default) or "modelscope"
-MODEL_HUB="${MODEL_HUB:-huggingface}"
+MODEL_HUB="${MODEL_HUB:-modelscope}"
 
 # ModelScope cache directory
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
@@ -125,6 +125,8 @@ if [ "$MODEL_HUB" = "modelscope" ]; then
         -v $HF_CACHE_DIR:/root/.cache/huggingface \
         -e MODELSCOPE_CACHE=/root/.cache/modelscope \
         -e HF_HOME=/root/.cache/huggingface \
+        -e VLLM_MM_VIDEO_MAX_NUM=0 \
+        -e VLLM_MM_IMAGE_MAX_NUM=16 \
         $VLLM_IMAGE"
 else
     # Hugging Face configuration
@@ -136,6 +138,8 @@ else
         -v $HF_CACHE_DIR:/root/.cache/huggingface \
         -e HF_HOME=/root/.cache/huggingface \
         -e HF_HUB_ENABLE_HF_TRANSFER=0 \
+        -e VLLM_MM_VIDEO_MAX_NUM=0 \
+        -e VLLM_MM_IMAGE_MAX_NUM=16 \
         $VLLM_IMAGE"
 fi
 
@@ -151,9 +155,9 @@ if [ "$MODEL_HUB" = "modelscope" ]; then
     # Use local ModelScope cache path
     MODEL_PATH="/root/.cache/modelscope/hub/models/$MODEL_ORG/$MODEL_NAME"
     echo "Using ModelScope local path: $MODEL_PATH"
-    VLLM_BASE_CMD="vllm serve $MODEL_PATH --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --limit-mm-per-prompt '{\"image\":16,\"video\":0}' --enable-auto-tool-choice --tool-call-parser hermes"
+    VLLM_BASE_CMD="vllm serve $MODEL_PATH --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --enable-auto-tool-choice --tool-call-parser hermes"
 else
-    VLLM_BASE_CMD="vllm serve $BASE_MODEL --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --limit-mm-per-prompt '{\"image\":16,\"video\":0}' --enable-auto-tool-choice --tool-call-parser hermes"
+    VLLM_BASE_CMD="vllm serve $BASE_MODEL --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION --enforce-eager --disable-custom-all-reduce --enable-auto-tool-choice --tool-call-parser hermes"
 fi
 
 # Add trust-remote-code flag if enabled

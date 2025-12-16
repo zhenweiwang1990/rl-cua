@@ -276,21 +276,24 @@ class GBoxClient:
             Coordinate generation response
         """
         # Build action object based on type
+        # According to GBox API docs: https://docs.gbox.ai/api-reference/model/generate-coordinates-for-a-model
         if action_type == "click":
             action = {
                 "type": "click",
                 "target": target,
             }
         elif action_type == "drag":
+            # Drag action requires "target" and "destination" fields (not "startTarget"/"endTarget")
             action = {
                 "type": "drag",
-                "startTarget": target,
-                "endTarget": end_target or target,
+                "target": target,
+                "destination": end_target or target,
             }
         elif action_type == "scroll":
+            # Scroll action requires "location" field (not "target")
             action = {
                 "type": "scroll",
-                "target": target,
+                "location": target,
                 "direction": direction or "down",
             }
         else:
@@ -414,15 +417,21 @@ class GBoxClient:
             raise ValueError("No box ID provided")
         
         try:
+            # GBox API expects start/end as objects and duration as string
+            # Format: start: {x, y}, end: {x, y}, duration: "300ms"
             result = self._sdk.client.post(
                 f"/boxes/{box_id}/actions/swipe",
                 cast_to=ResponseDict,
                 body={
-                    "startX": start_x,
-                    "startY": start_y,
-                    "endX": end_x,
-                    "endY": end_y,
-                    "duration": duration,
+                    "start": {
+                        "x": start_x,
+                        "y": start_y,
+                    },
+                    "end": {
+                        "x": end_x,
+                        "y": end_y,
+                    },
+                    "duration": f"{duration}ms",  # Duration must be a string like "300ms"
                 }
             )
             
@@ -558,7 +567,16 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
+        # Map button names to Android key codes
+        # If button endpoint doesn't exist, use key press as fallback
+        button_to_key = {
+            "back": "KEYCODE_BACK",
+            "home": "KEYCODE_HOME",
+            "menu": "KEYCODE_MENU",
+        }
+        
         try:
+            # Try button endpoint first
             result = self._sdk.client.post(
                 f"/boxes/{box_id}/actions/button",
                 cast_to=ResponseDict,
@@ -567,8 +585,22 @@ class GBoxClient:
             
             return self._parse_response(result)
         except Exception as e:
-            logger.error(f"Failed to press button: {e}")
-            raise
+            # If button endpoint doesn't exist (404), fall back to key press
+            # Check for HTTP status errors
+            error_str = str(e).lower()
+            status_code = None
+            if hasattr(e, 'status_code'):
+                status_code = e.status_code
+            elif hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                status_code = e.response.status_code
+            
+            if status_code == 404 or "404" in error_str or "not found" in error_str:
+                logger.warning(f"Button endpoint not found (404), using key press for {button}")
+                key_code = button_to_key.get(button.lower(), "KEYCODE_HOME")
+                return await self.press_key(keys=[key_code], box_id=box_id)
+            else:
+                logger.error(f"Failed to press button: {e}")
+                raise
     
     async def drag(
         self,
@@ -597,15 +629,20 @@ class GBoxClient:
             raise ValueError("No box ID provided")
         
         try:
+            # GBox API expects start/end as objects and duration as string
             result = self._sdk.client.post(
                 f"/boxes/{box_id}/actions/drag",
                 cast_to=ResponseDict,
                 body={
-                    "startX": start_x,
-                    "startY": start_y,
-                    "endX": end_x,
-                    "endY": end_y,
-                    "duration": duration,
+                    "start": {
+                        "x": start_x,
+                        "y": start_y,
+                    },
+                    "end": {
+                        "x": end_x,
+                        "y": end_y,
+                    },
+                    "duration": f"{duration}ms",  # Duration must be a string like "500ms"
                 }
             )
             

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -116,9 +117,20 @@ class CUAAgent:
         
         # Initialize clients
         self.gbox_client = GBoxClient(config.gbox)
+        
+        # Determine API base and key based on provider
+        if config.vlm_provider == "openrouter":
+            api_base = config.openrouter_api_base
+            api_key = config.openrouter_api_key
+        else:  # vllm
+            api_base = config.vllm_api_base
+            api_key = None  # vLLM doesn't require API key
+        
         self.vlm = VLMInference(
             model_name=config.model_name,
-            api_base=config.vllm_api_base,
+            provider=config.vlm_provider,
+            api_base=api_base,
+            api_key=api_key,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
@@ -182,7 +194,20 @@ class CUAAgent:
             
             # Agent loop
             for turn in range(self.config.max_turns):
+                turn_start = time.time()
                 rubric.num_turns = turn + 1
+                
+                # Initialize timing variables for this turn
+                screenshot_time = 0.0
+                vlm_time = 0.0
+                parse_time = 0.0
+                action_time = 0.0
+                total_tokens = 0
+                screenshot_size_kb = 0.0
+                
+                logger.info(f"{'='*80}")
+                logger.info(f"[Turn {turn + 1}/{self.config.max_turns}] Starting turn")
+                logger.info(f"{'='*80}")
                 
                 if verbose:
                     print(f"\n{'─'*60}")
@@ -190,11 +215,18 @@ class CUAAgent:
                     print(f"{'─'*60}")
                 
                 # Take screenshot
+                screenshot_start = time.time()
                 await asyncio.sleep(self.config.screenshot_delay)
                 screenshot_bytes, screenshot_uri = await self.gbox_client.take_screenshot()
+                screenshot_time = time.time() - screenshot_start
                 
+                screenshot_size_kb = len(screenshot_bytes) / 1024
+                logger.info(
+                    f"[Turn {turn + 1}] Screenshot captured: {screenshot_size_kb:.2f} KB, "
+                    f"took {screenshot_time:.3f}s"
+                )
                 if verbose:
-                    print(f"📸 Screenshot captured ({len(screenshot_bytes)} bytes)")
+                    print(f"📸 Screenshot captured ({screenshot_size_kb:.2f} KB, {screenshot_time:.3f}s)")
                 
                 # Create user message
                 previous_action = None
@@ -229,16 +261,81 @@ class CUAAgent:
                     temperature = self.config.temperature
                 
                 # Generate response
-                raw_response, parsed_response = await self.vlm.generate(
+                # Log input information
+                num_messages = len(self.conversation)
+                messages_summary = []
+                for msg in self.conversation[-3:]:  # Last 3 messages for summary
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        content_preview = content[:100] + "..." if len(content) > 100 else content
+                    else:
+                        content_preview = str(content)[:100]
+                    messages_summary.append(f"{role}: {content_preview}")
+                
+                logger.info(
+                    f"[Turn {turn + 1}] VLM Input: "
+                    f"{num_messages} messages, "
+                    f"screenshot: {screenshot_size_kb:.2f} KB, "
+                    f"temperature: {temperature:.2f}"
+                )
+                if verbose:
+                    print(f"\n📥 Input to VLM:")
+                    print(f"   Messages: {num_messages}")
+                    print(f"   Screenshot: {screenshot_size_kb:.2f} KB")
+                    print(f"   Temperature: {temperature:.2f}")
+                    if messages_summary:
+                        print(f"   Recent messages: {', '.join(messages_summary)}")
+                
+                # Call VLM
+                vlm_start = time.time()
+                raw_response, parsed_response, usage_info = await self.vlm.generate(
                     messages=self.conversation,
                     tools=self.tools,
                     image_data=screenshot_bytes,
                     temperature=temperature,
                 )
+                vlm_time = time.time() - vlm_start
+                
+                # Log VLM output and usage
+                prompt_tokens = usage_info.get("prompt_tokens", 0)
+                completion_tokens = usage_info.get("completion_tokens", 0)
+                total_tokens = usage_info.get("total_tokens", 0)
+                model_used = usage_info.get("model", "unknown")
+                finish_reason = usage_info.get("finish_reason", "unknown")
+                
+                logger.info(
+                    f"[Turn {turn + 1}] VLM Output: "
+                    f"took {vlm_time:.3f}s, "
+                    f"tokens: {prompt_tokens}+{completion_tokens}={total_tokens}, "
+                    f"model: {model_used}, "
+                    f"finish_reason: {finish_reason}"
+                )
+                # Log complete VLM response
+                logger.info(f"[Turn {turn + 1}] VLM Response (full):\n{raw_response}")
+                
+                # Log parsed response structure
+                if parsed_response.get("tool_calls"):
+                    logger.info(
+                        f"[Turn {turn + 1}] VLM Response contains {len(parsed_response['tool_calls'])} tool call(s)"
+                    )
+                else:
+                    logger.info(f"[Turn {turn + 1}] VLM Response contains no tool calls (text-only response)")
                 
                 if verbose:
-                    print(f"\n🤖 Model response:")
-                    print(f"   {raw_response[:200]}...")
+                    print(f"\n🤖 Model response ({vlm_time:.3f}s):")
+                    print(f"   Tokens: {prompt_tokens} (prompt) + {completion_tokens} (completion) = {total_tokens} (total)")
+                    print(f"   Model: {model_used}")
+                    print(f"   Finish reason: {finish_reason}")
+                    print(f"\n   Full Response:")
+                    print(f"   {raw_response}")
+                    if parsed_response.get("tool_calls"):
+                        print(f"\n   🔧 Tool Calls ({len(parsed_response['tool_calls'])}):")
+                        for i, tc in enumerate(parsed_response["tool_calls"]):
+                            print(f"\n   [{i+1}] Complete Tool Call:")
+                            print(f"   {json.dumps(tc, indent=4, ensure_ascii=False)}")
+                    if parsed_response.get("content"):
+                        print(f"\n   Content: {parsed_response['content']}")
                 
                 # Add assistant message
                 assistant_msg = {
@@ -250,10 +347,23 @@ class CUAAgent:
                 self.conversation.append(assistant_msg)
                 
                 # Parse action
+                parse_start = time.time()
                 action = None
                 action_dict = None
                 
                 if parsed_response.get("tool_calls"):
+                    # Log all tool calls completely
+                    logger.info(
+                        f"[Turn {turn + 1}] Complete Tool Calls ({len(parsed_response['tool_calls'])}):\n"
+                        f"{json.dumps(parsed_response['tool_calls'], indent=2, ensure_ascii=False)}"
+                    )
+                    
+                    if verbose:
+                        print(f"\n🔧 Complete Tool Calls ({len(parsed_response['tool_calls'])}):")
+                        for i, tc in enumerate(parsed_response["tool_calls"]):
+                            print(f"\n   [{i+1}] {json.dumps(tc, indent=4, ensure_ascii=False)}")
+                    
+                    # Process first tool call for action execution
                     tool_call = parsed_response["tool_calls"][0]
                     tool_name = tool_call["function"]["name"]
                     try:
@@ -264,19 +374,31 @@ class CUAAgent:
                     action_dict = tool_call_to_action_dict(tool_name, tool_args)
                     action = parse_action(action_dict)
                     
+                    logger.info(
+                        f"[Turn {turn + 1}] Parsed tool call: {tool_name}, "
+                        f"action_type: {action.action_type if action else 'None'}"
+                    )
                     if verbose:
-                        print(f"\n🔧 Tool call: {tool_name}")
-                        print(f"   Arguments: {json.dumps(tool_args, indent=2)[:200]}")
+                        print(f"\n   Parsed as: {action.action_type if action else 'None'}")
+                        if action and action.target:
+                            print(f"   Target: {action.target.to_description()}")
                 else:
                     # Try to extract action from text
                     action_dict = extract_action_from_response(raw_response)
                     if action_dict:
                         action = parse_action(action_dict)
+                        logger.info(
+                            f"[Turn {turn + 1}] Extracted action from text: {action.action_type if action else 'None'}"
+                        )
                     else:
                         rubric.num_parse_errors += 1
+                        logger.warning(f"[Turn {turn + 1}] Failed to parse action from response")
                         if verbose:
                             print(f"\n⚠️ Could not parse action from response")
                         continue
+                
+                parse_time = time.time() - parse_start
+                logger.info(f"[Turn {turn + 1}] Action parsing took {parse_time:.3f}s")
                 
                 if action is None:
                     rubric.num_parse_errors += 1
@@ -306,17 +428,49 @@ class CUAAgent:
                 # Execute action
                 step = ActionStep(turn=turn + 1, action=action)
                 
+                action_start = time.time()
                 try:
+                    logger.info(
+                        f"[Turn {turn + 1}] Executing action: {action.action_type}, "
+                        f"target: {action.target.to_description() if action.target else 'None'}"
+                    )
                     await self._execute_action(
                         action, screenshot_uri, step, rubric, verbose
                     )
+                    action_time = time.time() - action_start
+                    logger.info(
+                        f"[Turn {turn + 1}] Action executed successfully in {action_time:.3f}s, "
+                        f"coordinates: {step.coordinates}"
+                    )
                 except Exception as e:
+                    action_time = time.time() - action_start
                     step.success = False
                     step.error_message = str(e)
                     rubric.num_action_errors += 1
-                    logger.error(f"Action execution error: {e}")
+                    logger.error(
+                        f"[Turn {turn + 1}] Action execution failed after {action_time:.3f}s: {e}"
+                    )
                     if verbose:
-                        print(f"\n❌ Action error: {e}")
+                        print(f"\n❌ Action error ({action_time:.3f}s): {e}")
+                
+                # Wait after action
+                await asyncio.sleep(self.config.action_delay)
+                
+                # Log turn summary
+                turn_time = time.time() - turn_start
+                logger.info(
+                    f"[Turn {turn + 1}] Turn completed in {turn_time:.3f}s: "
+                    f"screenshot: {screenshot_time:.3f}s, "
+                    f"vlm: {vlm_time:.3f}s ({total_tokens} tokens), "
+                    f"parse: {parse_time:.3f}s, "
+                    f"action: {action_time:.3f}s, "
+                    f"success: {step.success}"
+                )
+                if verbose:
+                    print(f"\n⏱️ Turn {turn + 1} total time: {turn_time:.3f}s")
+                    print(f"   Breakdown: screenshot={screenshot_time:.3f}s, "
+                          f"vlm={vlm_time:.3f}s ({total_tokens} tokens), "
+                          f"parse={parse_time:.3f}s, action={action_time:.3f}s")
                 
                 self.action_history.append(step)
                 
@@ -337,6 +491,22 @@ class CUAAgent:
                 
                 # Wait after action
                 await asyncio.sleep(self.config.action_delay)
+                
+                # Log turn summary
+                turn_time = time.time() - turn_start
+                logger.info(
+                    f"[Turn {turn + 1}] Turn completed in {turn_time:.3f}s: "
+                    f"screenshot: {screenshot_time:.3f}s, "
+                    f"vlm: {vlm_time:.3f}s ({total_tokens} tokens), "
+                    f"parse: {parse_time:.3f}s, "
+                    f"action: {action_time:.3f}s, "
+                    f"success: {step.success}"
+                )
+                if verbose:
+                    print(f"\n⏱️ Turn {turn + 1} total time: {turn_time:.3f}s")
+                    print(f"   Breakdown: screenshot={screenshot_time:.3f}s, "
+                          f"vlm={vlm_time:.3f}s ({total_tokens} tokens), "
+                          f"parse={parse_time:.3f}s, action={action_time:.3f}s")
             
             # Check if ran out of turns
             if not rubric.task_completed and rubric.num_turns >= self.config.max_turns:
@@ -410,28 +580,51 @@ class CUAAgent:
             start_desc = action.start_target.to_description() if action.start_target else "screen center"
             end_desc = action.end_target.to_description() if action.end_target else "screen center"
             
-            # Generate start coordinates
-            start_result = await self.gbox_client.generate_coordinates(
+            # Use drag type to get both start and end coordinates in one call
+            # According to GBox docs: https://docs.gbox.ai/api-reference/model/generate-coordinates-for-a-model
+            drag_result = await self.gbox_client.generate_coordinates(
                 screenshot_uri=screenshot_uri,
-                action_type="click",
+                action_type="drag",
                 target=start_desc,
+                end_target=end_desc,
             )
-            start_coords = start_result.get("response", {}).get("coordinates", {})
             
-            # Generate end coordinates
-            end_result = await self.gbox_client.generate_coordinates(
-                screenshot_uri=screenshot_uri,
-                action_type="click",
-                target=end_desc,
-            )
-            end_coords = end_result.get("response", {}).get("coordinates", {})
+            # Parse drag response - may return start/end coordinates or single coordinates
+            response_data = drag_result.get("response", {})
+            coordinates = response_data.get("coordinates", {})
             
-            step.coordinates = {
-                "start_x": start_coords.get("x", 0),
-                "start_y": start_coords.get("y", 0),
-                "end_x": end_coords.get("x", 0),
-                "end_y": end_coords.get("y", 0),
-            }
+            # Check if response has separate start/end coordinates
+            if "start" in coordinates and "end" in coordinates:
+                start_coords = coordinates.get("start", {})
+                end_coords = coordinates.get("end", {})
+                step.coordinates = {
+                    "start_x": start_coords.get("x", 0),
+                    "start_y": start_coords.get("y", 0),
+                    "end_x": end_coords.get("x", 0),
+                    "end_y": end_coords.get("y", 0),
+                }
+            else:
+                # Fallback: if drag doesn't return both, use separate calls
+                start_result = await self.gbox_client.generate_coordinates(
+                    screenshot_uri=screenshot_uri,
+                    action_type="click",
+                    target=start_desc,
+                )
+                start_coords = start_result.get("response", {}).get("coordinates", {})
+                
+                end_result = await self.gbox_client.generate_coordinates(
+                    screenshot_uri=screenshot_uri,
+                    action_type="click",
+                    target=end_desc,
+                )
+                end_coords = end_result.get("response", {}).get("coordinates", {})
+                
+                step.coordinates = {
+                    "start_x": start_coords.get("x", 0),
+                    "start_y": start_coords.get("y", 0),
+                    "end_x": end_coords.get("x", 0),
+                    "end_y": end_coords.get("y", 0),
+                }
             
             if verbose:
                 print(f"   📍 Swipe: ({step.coordinates['start_x']}, {step.coordinates['start_y']}) → ({step.coordinates['end_x']}, {step.coordinates['end_y']})")
@@ -446,9 +639,10 @@ class CUAAgent:
         elif action.action_type == ActionType.SCROLL:
             rubric.num_scrolls += 1
             
-            target_desc = action.target.to_description() if action.target else "screen center"
+            # For scroll, use "location" field - default to "screen center" if no target
+            target_desc = action.target.to_description() if action.target else "center of the screen"
             
-            # Generate coordinates
+            # Generate coordinates using scroll type (which uses "location" field)
             result = await self.gbox_client.generate_coordinates(
                 screenshot_uri=screenshot_uri,
                 action_type="scroll",
