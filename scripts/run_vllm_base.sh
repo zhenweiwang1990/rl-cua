@@ -7,7 +7,7 @@ echo "=========================================="
 echo ""
 
 # Default values - Using Qwen3-VL for CUA
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-32B-A3B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-30B-A3B-Instruct}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 GPU_DEVICES="${GPU_DEVICES:-all}"
