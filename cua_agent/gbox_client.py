@@ -1,18 +1,22 @@
-"""GBox API Client for box management and UI actions."""
+"""GBox API Client for box management and UI actions using official SDK."""
 
 import base64
+import binascii
+import json
 import logging
 from typing import Optional, Dict, Any, List, Tuple
-import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from gbox_sdk import GboxSDK
 
 from cua_agent.config import GBoxConfig
+
+# Type alias for SDK response
+ResponseDict = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
 
 class GBoxClient:
-    """Client for interacting with GBox API.
+    """Client for interacting with GBox API using official SDK.
     
     Handles:
     - Box creation and termination
@@ -29,22 +33,33 @@ class GBoxClient:
         """
         self.config = config
         self.box_id: Optional[str] = None
-        self._client = httpx.AsyncClient(
-            base_url=config.api_base_url,
-            headers={
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=120.0,
-        )
+        self._sdk = GboxSDK(api_key=config.api_key)
+        self._box: Optional[Any] = None  # Box resource object
     
-    @property
-    def headers(self) -> Dict[str, str]:
-        """Get authorization headers."""
-        return {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+    def _parse_response(self, response) -> Dict[str, Any]:
+        """Parse SDK response to dictionary.
+        
+        Args:
+            response: SDK response object
+            
+        Returns:
+            Dictionary representation of response
+        """
+        if hasattr(response, 'json'):
+            return response.json()
+        elif hasattr(response, 'data'):
+            if hasattr(response.data, 'model_dump'):
+                return response.data.model_dump()
+            elif hasattr(response.data, 'dict'):
+                return response.data.dict()
+            else:
+                return dict(response.data) if hasattr(response.data, '__dict__') else response.data
+        elif hasattr(response, 'model_dump'):
+            return response.model_dump()
+        elif hasattr(response, 'dict'):
+            return response.dict()
+        else:
+            return dict(response) if isinstance(response, dict) else {"response": response}
     
     async def create_box(self, box_type: Optional[str] = None) -> Dict[str, Any]:
         """Create a new GBox environment.
@@ -56,30 +71,49 @@ class GBoxClient:
             Box creation response
         """
         box_type = box_type or self.config.box_type
-        endpoint = f"/boxes/{box_type}"
-        
-        payload = {
-            "wait": self.config.wait,
-            "timeout": self.config.timeout,
-            "config": {
-                "expiresIn": self.config.expires_in,
-            }
-        }
-        
-        if self.config.labels:
-            payload["config"]["labels"] = self.config.labels
-        if self.config.envs:
-            payload["config"]["envs"] = self.config.envs
-        
         logger.info(f"Creating {box_type} box...")
-        response = await self._client.post(endpoint, json=payload)
-        response.raise_for_status()
         
-        result = response.json()
-        self.box_id = result.get("id")
-        logger.info(f"Box created: {self.box_id}")
-        
-        return result
+        try:
+            # Create box using SDK - according to official docs
+            # https://docs.gbox.ai/api-reference/box/create-android-box
+            # Note: SDK create() is synchronous, not async
+            box_response = self._sdk.create(
+                type=box_type,
+                wait=self.config.wait,
+                timeout=self.config.timeout,
+                config={
+                    "expiresIn": self.config.expires_in,
+                    **({"labels": self.config.labels} if self.config.labels else {}),
+                    **({"envs": self.config.envs} if self.config.envs else {}),
+                }
+            )
+            
+            # Store box response
+            self._box = box_response
+            # Get box ID from response.data.id (according to official example)
+            if hasattr(box_response, 'data') and hasattr(box_response.data, 'id'):
+                self.box_id = box_response.data.id
+            elif hasattr(box_response, 'id'):
+                self.box_id = box_response.id
+            elif isinstance(box_response, dict):
+                self.box_id = box_response.get("id") or (box_response.get("data", {}).get("id") if isinstance(box_response.get("data"), dict) else None)
+            else:
+                raise ValueError(f"Unexpected box response format: {type(box_response)}")
+            
+            if not self.box_id:
+                raise ValueError("Failed to extract box ID from response")
+            
+            logger.info(f"Box created: {self.box_id}")
+            return {"id": self.box_id}
+            
+        except Exception as e:
+            logger.error(f"Failed to create {box_type} box: {e}")
+            raise RuntimeError(
+                f"Cannot create GBox. Please check:\n"
+                f"  1. API key is valid\n"
+                f"  2. Network connectivity\n"
+                f"  3. Box type is supported: {box_type}"
+            ) from e
     
     async def terminate_box(self, box_id: Optional[str] = None) -> Dict[str, Any]:
         """Terminate a GBox environment.
@@ -95,16 +129,27 @@ class GBoxClient:
             raise ValueError("No box ID provided")
         
         logger.info(f"Terminating box: {box_id}")
-        response = await self._client.post(
-            "/boxes/terminate",
-            json={"id": box_id}
-        )
-        response.raise_for_status()
         
-        if box_id == self.box_id:
-            self.box_id = None
-        
-        return response.json()
+        try:
+            # Use SDK terminate method if available, otherwise use DELETE endpoint
+            if hasattr(self._sdk, 'terminate'):
+                result = self._sdk.terminate(box_id)
+            else:
+                # Use DELETE endpoint: DELETE /boxes/{boxId}
+                result = self._sdk.client.delete(
+                    f"/boxes/{box_id}",
+                    cast_to=ResponseDict
+                )
+            return self._parse_response(result) if result else {"id": box_id, "status": "terminated"}
+            
+            if box_id == self.box_id:
+                self.box_id = None
+                self._box = None
+            
+            return {"id": box_id, "status": "terminated"}
+        except Exception as e:
+            logger.error(f"Failed to terminate box: {e}")
+            raise
     
     async def get_box(self, box_id: Optional[str] = None) -> Dict[str, Any]:
         """Get box information.
@@ -119,11 +164,13 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.get(f"/boxes/{box_id}")
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.get(f"/boxes/{box_id}", cast_to=ResponseDict)
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to get box info: {e}")
+            raise
     
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=5))
     async def take_screenshot(
         self,
         box_id: Optional[str] = None,
@@ -142,48 +189,71 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/screenshot",
-            json={"format": format}
-        )
-        response.raise_for_status()
-        
-        result = response.json()
-        
-        # Handle different response formats
-        if "screenshot" in result:
-            screenshot_data = result["screenshot"]
-            if isinstance(screenshot_data, dict):
-                # URI format
-                uri = screenshot_data.get("uri", "")
-                if uri.startswith("data:"):
+        try:
+            # Use SDK client to call screenshot API
+            # According to docs: POST /boxes/{boxId}/actions/screenshot
+            # cast_to is required - use dict as default response type
+            # body should be dict, SDK will serialize it
+            screenshot_result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/screenshot",
+                cast_to=ResponseDict,
+                body={"format": format}
+            )
+            
+            # Handle screenshot result - SDK returns dict directly when cast_to=ResponseDict
+            result_data = screenshot_result if isinstance(screenshot_result, dict) else self._parse_response(screenshot_result)
+            
+            # Log response for debugging (use INFO level since DEBUG might not be enabled)
+            logger.info(f"Screenshot response type: {type(result_data)}, keys: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
+            
+            # Extract screenshot data from response
+            # Response format: {"screenshot": "data:image/png;base64,..."} or {"uri": "https://..."}
+            screenshot_data = None
+            if isinstance(result_data, dict):
+                # Try different possible keys (uri is most common based on logs)
+                screenshot_data = (
+                    result_data.get("uri") or  # Most common format
+                    result_data.get("screenshot") or 
+                    result_data.get("url") or
+                    (result_data.get("data", {}).get("uri") if isinstance(result_data.get("data"), dict) else None) or
+                    (result_data.get("data", {}).get("screenshot") if isinstance(result_data.get("data"), dict) else None)
+                )
+            
+            if not screenshot_data or (isinstance(screenshot_data, str) and not screenshot_data.strip()):
+                logger.error(f"Unexpected screenshot response format: {result_data}")
+                logger.error(f"Available keys: {list(result_data.keys()) if isinstance(result_data, dict) else 'N/A'}")
+                raise ValueError(f"Failed to extract screenshot from response: {result_data}")
+            
+            # Convert to bytes and data URI
+            if isinstance(screenshot_data, str):
+                if screenshot_data.startswith("data:"):
                     # Base64 data URI
-                    _, data = uri.split(",", 1)
-                    image_bytes = base64.b64decode(data)
-                    return image_bytes, uri
+                    try:
+                        parts = screenshot_data.split(",", 1)
+                        if len(parts) != 2:
+                            raise ValueError(f"Invalid data URI format: {screenshot_data[:50]}...")
+                        _, data = parts
+                        image_bytes = base64.b64decode(data)
+                        return image_bytes, screenshot_data
+                    except (ValueError, base64.binascii.Error) as e:
+                        logger.error(f"Failed to parse data URI: {e}, data length: {len(screenshot_data)}")
+                        raise ValueError(f"Invalid data URI format: {screenshot_data[:50]}...")
                 else:
                     # HTTP URL - fetch the image
-                    img_response = await self._client.get(uri)
-                    img_response.raise_for_status()
-                    image_bytes = img_response.content
-                    base64_data = base64.b64encode(image_bytes).decode()
-                    data_uri = f"data:image/{format};base64,{base64_data}"
-                    return image_bytes, data_uri
-            elif isinstance(screenshot_data, str):
-                # Direct base64 or URL
-                if screenshot_data.startswith("data:"):
-                    _, data = screenshot_data.split(",", 1)
-                    image_bytes = base64.b64decode(data)
-                    return image_bytes, screenshot_data
-                else:
-                    img_response = await self._client.get(screenshot_data)
-                    img_response.raise_for_status()
-                    image_bytes = img_response.content
-                    base64_data = base64.b64encode(image_bytes).decode()
-                    data_uri = f"data:image/{format};base64,{base64_data}"
-                    return image_bytes, data_uri
-        
-        raise ValueError(f"Unexpected screenshot response format: {result}")
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        img_response = await client.get(screenshot_data)
+                        img_response.raise_for_status()
+                        image_bytes = img_response.content
+                        base64_data = base64.b64encode(image_bytes).decode()
+                        data_uri = f"data:image/{format};base64,{base64_data}"
+                        return image_bytes, data_uri
+            
+            raise ValueError(f"Unexpected screenshot data type: {type(screenshot_data)}, value: {str(screenshot_data)[:100]}")
+            
+        except Exception as e:
+            logger.error(f"Failed to take screenshot: {e}", exc_info=True)
+            raise
     
     async def generate_coordinates(
         self,
@@ -226,16 +296,24 @@ class GBoxClient:
         else:
             raise ValueError(f"Unknown action type: {action_type}")
         
-        payload = {
-            "model": self.config.model,
-            "screenshot": screenshot_uri,
-            "action": action,
-        }
-        
-        response = await self._client.post("/model", json=payload)
-        response.raise_for_status()
-        
-        return response.json()
+        try:
+            # Use SDK client to call model API
+            # According to docs: POST /model
+            result = self._sdk.client.post(
+                "/model",
+                cast_to=ResponseDict,
+                body={
+                    "model": self.config.model,
+                    "screenshot": screenshot_uri,
+                    "action": action,
+                }
+            )
+            
+            return self._parse_response(result)
+                
+        except Exception as e:
+            logger.error(f"Failed to generate coordinates: {e}")
+            raise
     
     async def click(
         self,
@@ -261,20 +339,21 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        payload = {
-            "x": x,
-            "y": y,
-            "button": button,
-        }
-        if double_click:
-            payload["doubleClick"] = True
-        
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/click",
-            json=payload
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            payload = {"x": x, "y": y, "button": button}
+            if double_click:
+                payload["doubleClick"] = True
+            
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/click",
+                cast_to=ResponseDict,
+                body=payload
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to click: {e}")
+            raise
     
     async def tap(
         self,
@@ -296,12 +375,17 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/tap",
-            json={"x": x, "y": y}
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/tap",
+                cast_to=ResponseDict,
+                body={"x": x, "y": y}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to tap: {e}")
+            raise
     
     async def swipe(
         self,
@@ -329,18 +413,23 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/swipe",
-            json={
-                "startX": start_x,
-                "startY": start_y,
-                "endX": end_x,
-                "endY": end_y,
-                "duration": duration,
-            }
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/swipe",
+                cast_to=ResponseDict,
+                body={
+                    "startX": start_x,
+                    "startY": start_y,
+                    "endX": end_x,
+                    "endY": end_y,
+                    "duration": duration,
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to swipe: {e}")
+            raise
     
     async def scroll(
         self,
@@ -366,17 +455,22 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/scroll",
-            json={
-                "x": x,
-                "y": y,
-                "direction": direction,
-                "distance": distance,
-            }
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/scroll",
+                cast_to=ResponseDict,
+                body={
+                    "x": x,
+                    "y": y,
+                    "direction": direction,
+                    "distance": distance,
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to scroll: {e}")
+            raise
     
     async def type_text(
         self,
@@ -400,17 +494,21 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        payload = {"text": text}
-        if x is not None and y is not None:
-            payload["x"] = x
-            payload["y"] = y
-        
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/type",
-            json=payload
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            params = {"text": text}
+            if x is not None and y is not None:
+                params["x"] = x
+                params["y"] = y
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/type",
+                cast_to=ResponseDict,
+                body=params
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to type text: {e}")
+            raise
     
     async def press_key(
         self,
@@ -430,12 +528,17 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/key",
-            json={"keys": keys}
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/key",
+                cast_to=ResponseDict,
+                body={"keys": keys}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to press key: {e}")
+            raise
     
     async def press_button(
         self,
@@ -455,12 +558,17 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/button",
-            json={"button": button}
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/button",
+                cast_to=ResponseDict,
+                body={"button": button}
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to press button: {e}")
+            raise
     
     async def drag(
         self,
@@ -488,22 +596,33 @@ class GBoxClient:
         if not box_id:
             raise ValueError("No box ID provided")
         
-        response = await self._client.post(
-            f"/boxes/{box_id}/actions/drag",
-            json={
-                "startX": start_x,
-                "startY": start_y,
-                "endX": end_x,
-                "endY": end_y,
-                "duration": duration,
-            }
-        )
-        response.raise_for_status()
-        return response.json()
+        try:
+            result = self._sdk.client.post(
+                f"/boxes/{box_id}/actions/drag",
+                cast_to=ResponseDict,
+                body={
+                    "startX": start_x,
+                    "startY": start_y,
+                    "endX": end_x,
+                    "endY": end_y,
+                    "duration": duration,
+                }
+            )
+            
+            return self._parse_response(result)
+        except Exception as e:
+            logger.error(f"Failed to drag: {e}")
+            raise
     
     async def close(self):
-        """Close the HTTP client."""
-        await self._client.aclose()
+        """Close the SDK client."""
+        # SDK handles cleanup automatically
+        if self._box:
+            try:
+                await self.terminate_box()
+            except Exception as e:
+                logger.warning(f"Failed to terminate box on close: {e}")
+        self._box = None
     
     async def __aenter__(self):
         return self
@@ -515,4 +634,3 @@ class GBoxClient:
             except Exception as e:
                 logger.error(f"Failed to terminate box on exit: {e}")
         await self.close()
-

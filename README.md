@@ -33,6 +33,23 @@ The CUA Agent:
 
 ## Installation
 
+### Option 1: Docker (Recommended)
+
+Using Docker ensures a consistent environment with all dependencies:
+
+```bash
+# Build the Docker image
+./build_docker.sh
+
+# Run agent in Docker
+./docker_run.sh "Open the Settings app"
+
+# Or use docker-compose
+docker-compose up
+```
+
+### Option 2: Local Installation
+
 ```bash
 # Clone or navigate to the project
 cd rl-cua
@@ -90,7 +107,46 @@ Options:
 
 # With custom server
 VLLM_API_BASE=http://gpu-server:8000/v1 ./run_agent.sh "Install Twitter app"
+
+# Using Docker
+./docker_run.sh "Open the Settings app" --verbose
+./docker_run.sh "Search for weather" --box-type android --model unsloth/Qwen3-VL-32B-Instruct
 ```
+
+## Docker Usage
+
+### Building the Image
+
+```bash
+# Build with default name (cua-agent:latest)
+./build_docker.sh
+
+# Build with custom name and tag
+./build_docker.sh my-cua-agent v1.0
+```
+
+### Running with Docker
+
+```bash
+# Simple usage
+./docker_run.sh "Task description"
+
+# With options
+./docker_run.sh "Task description" --verbose --box-type android
+
+# Using docker-compose (set GBOX_API_KEY in .env first)
+docker-compose up
+```
+
+### Docker Environment Variables
+
+You can set environment variables in `.env` file or pass them when running:
+
+- `GBOX_API_KEY` (required): Your GBox API key
+- `VLLM_API_BASE` (optional): vLLM server URL
+- `MODEL_NAME` (optional): Model name
+- `BOX_TYPE` (optional): Box type (android/linux)
+- `MAX_TURNS` (optional): Maximum turns
 
 ## Action Types
 
@@ -194,7 +250,7 @@ For better performance with multiple agents or larger models, use the provided s
 ### Start vLLM Server (Base Model)
 
 ```bash
-# Start with default settings (Qwen3-VL-32B-Instruct)
+# Start with default settings (Qwen3-VL-32B-Instruct from Hugging Face)
 ./scripts/run_vllm_base.sh
 
 # With custom port
@@ -202,6 +258,9 @@ PORT=8080 ./scripts/run_vllm_base.sh
 
 # With different model
 BASE_MODEL=Qwen/Qwen2-VL-7B-Instruct ./scripts/run_vllm_base.sh
+
+# Use ModelScope (for users in China)
+MODEL_HUB=modelscope BASE_MODEL=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
 ```
 
 ### Start vLLM Server (with LoRA)
@@ -235,6 +294,27 @@ export VLLM_API_BASE=http://localhost:8000/v1
 | `run_vllm_lora.sh` | Start vLLM with LoRA adapter (daemon mode) |
 | `run_vllm_inference.sh` | Start vLLM with LoRA (interactive mode) |
 | `stop_vllm.sh` | Stop all vLLM containers |
+
+### ModelScope Support (for China Users)
+
+All scripts support loading models from ModelScope:
+
+```bash
+# Set MODEL_HUB environment variable
+export MODEL_HUB=modelscope
+
+# Start with ModelScope
+MODEL_HUB=modelscope BASE_MODEL=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
+
+# Or with LoRA
+MODEL_HUB=modelscope ./scripts/run_vllm_lora.sh
+```
+
+**Environment Variables for ModelScope:**
+- `MODEL_HUB=modelscope` - Use ModelScope instead of Hugging Face
+- `MODELSCOPE_CACHE` - Cache directory (default: `~/.cache/modelscope`)
+
+**Note:** When using ModelScope, the scripts will automatically install the `modelscope` Python package.
 
 ## GRPO Training (Coming Soon)
 

@@ -34,16 +34,24 @@ fi
 TASK="$1"
 shift
 
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load .env file if it exists
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 # Check for GBOX_API_KEY
 if [ -z "$GBOX_API_KEY" ]; then
     echo "Error: GBOX_API_KEY environment variable is not set"
     echo "Get your API key from https://gbox.ai and run:"
     echo "  export GBOX_API_KEY=your_api_key"
+    echo "Or add it to .env file in the project root"
     exit 1
 fi
-
-# Script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default values
 BOX_TYPE="${BOX_TYPE:-android}"

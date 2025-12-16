@@ -177,10 +177,9 @@ Examples:
         sys.exit(0 if result['rubric']['task_success'] else 1)
         
     except Exception as e:
-        logger.error(f"Error: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
+        logger.error(f"Error: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

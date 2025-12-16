@@ -93,12 +93,18 @@ MODEL_ABS_PATH="$(cd "$(dirname "$MODEL_ABS_PATH")" && pwd)/$(basename "$MODEL_A
 
 HF_CACHE_DIR="${HF_CACHE_DIR:-$HOME/.cache/huggingface}"
 
-# Hugging Face mirror for China (can be overridden via HF_ENDPOINT env var)
-# Common mirrors: https://hf-mirror.com (default), https://huggingface.co (original)
+# Model Hub Selection
+MODEL_HUB="${MODEL_HUB:-huggingface}"
+
+# Hugging Face mirror for China
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+
+# ModelScope cache directory
+MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
 
 echo "Configuration:"
 echo "  - Base model: $BASE_MODEL"
+echo "  - Model hub: $MODEL_HUB"
 echo "  - LoRA adapter: $MODEL_ABS_PATH"
 echo "  - LoRA name: $LORA_NAME"
 echo "  - Container name: $CONTAINER_NAME"
@@ -106,7 +112,11 @@ echo "  - Port: $PORT"
 echo "  - Host: $HOST"
 echo "  - Tensor parallel size: $TENSOR_PARALLEL_SIZE"
 echo "  - Max model length: $MAX_MODEL_LEN"
-echo "  - Hugging Face endpoint: $HF_ENDPOINT"
+if [ "$MODEL_HUB" = "modelscope" ]; then
+    echo "  - ModelScope cache: $MODELSCOPE_CACHE"
+else
+    echo "  - Hugging Face endpoint: $HF_ENDPOINT"
+fi
 echo "  - Auto restart: enabled"
 echo ""
 
@@ -119,17 +129,31 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
 fi
 
 # Prepare Docker command with auto-restart
-DOCKER_CMD="docker run -d \
-    --name $CONTAINER_NAME \
-    --restart=always \
-    $GPU_FLAGS \
-    -p $PORT:$PORT \
-    -v $MODEL_ABS_PATH:/workspace/lora_adapter:ro \
-    -v $HF_CACHE_DIR:/root/.cache/huggingface \
-    -e HF_HOME=/root/.cache/huggingface \
-    -e HF_ENDPOINT=$HF_ENDPOINT \
-    -e HF_HUB_ENABLE_HF_TRANSFER=1 \
-    $VLLM_IMAGE"
+if [ "$MODEL_HUB" = "modelscope" ]; then
+    DOCKER_CMD="docker run -d \
+        --name $CONTAINER_NAME \
+        --restart=always \
+        $GPU_FLAGS \
+        -p $PORT:$PORT \
+        -v $MODEL_ABS_PATH:/workspace/lora_adapter:ro \
+        -v $MODELSCOPE_CACHE:/root/.cache/modelscope \
+        -v $HF_CACHE_DIR:/root/.cache/huggingface \
+        -e MODELSCOPE_CACHE=/root/.cache/modelscope \
+        -e HF_HOME=/root/.cache/huggingface \
+        $VLLM_IMAGE"
+else
+    DOCKER_CMD="docker run -d \
+        --name $CONTAINER_NAME \
+        --restart=always \
+        $GPU_FLAGS \
+        -p $PORT:$PORT \
+        -v $MODEL_ABS_PATH:/workspace/lora_adapter:ro \
+        -v $HF_CACHE_DIR:/root/.cache/huggingface \
+        -e HF_HOME=/root/.cache/huggingface \
+        -e HF_ENDPOINT=$HF_ENDPOINT \
+        -e HF_HUB_ENABLE_HF_TRANSFER=1 \
+        $VLLM_IMAGE"
+fi
 
 # Prepare vLLM command
 # Note: For VLM models with LoRA
@@ -141,16 +165,26 @@ if [ "$TRUST_REMOTE_CODE" = "true" ]; then
     VLLM_BASE_CMD="$VLLM_BASE_CMD --trust-remote-code"
 fi
 
-# Wrap in bash -c to upgrade transformers first
-# Build the full command string with proper escaping
-VLLM_CMD="bash -c 'pip install --upgrade transformers>=4.50.0 -q && $VLLM_BASE_CMD'"
+# Build the command string
+if [ "$MODEL_HUB" = "modelscope" ]; then
+    # Install modelscope library, use vLLM's built-in transformers
+    VLLM_CMD="bash -c 'pip install modelscope -q && $VLLM_BASE_CMD'"
+else
+    # Use vLLM's built-in transformers version
+    VLLM_CMD="$VLLM_BASE_CMD"
+fi
 
 echo "Starting vLLM inference server with auto-restart..."
 echo ""
 
 # Run the container in detached mode
-# Use eval to properly handle the command string with spaces and quotes
-CONTAINER_ID=$(eval "$DOCKER_CMD $VLLM_CMD")
+if [ "$MODEL_HUB" = "modelscope" ]; then
+    # Use eval for bash -c command
+    CONTAINER_ID=$(eval "$DOCKER_CMD $VLLM_CMD")
+else
+    # Direct execution
+    CONTAINER_ID=$($DOCKER_CMD $VLLM_CMD)
+fi
 
 echo "✓ Container started successfully!"
 echo "  Container ID: ${CONTAINER_ID:0:12}"

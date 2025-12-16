@@ -9,7 +9,8 @@ class GBoxConfig:
     """Configuration for GBox API connection."""
     
     api_key: str = ""
-    api_base_url: str = "https://api.gbox.ai"
+    # Note: api_base_url is no longer used with official SDK
+    # The SDK handles the API endpoint automatically
     
     # Box creation settings
     box_type: str = "android"  # "android" or "linux"

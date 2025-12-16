@@ -1,8 +1,14 @@
 # CUA Agent Dependencies
+
+# GBox SDK (official)
+# Install from GitHub: pip install git+https://github.com/babelcloud/gbox-sdk-py.git
+# Note: This package may not be on PyPI, install it separately in Dockerfile
+
 # Vision-Language Model Inference
 vllm>=0.6.0
 transformers>=4.44.0
 torch>=2.0.0
+accelerate>=0.20.0
 
 # Image Processing
 Pillow>=10.0.0
@@ -15,4 +21,7 @@ aiohttp>=3.9.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
+
+# Optional but recommended
+numpy>=1.24.0
 

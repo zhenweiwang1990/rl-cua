@@ -61,6 +61,7 @@ class VLMInference:
                 base_url=api_base,
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=300.0,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
             )
     
     async def _ensure_local_model(self):
@@ -193,8 +194,22 @@ class VLMInference:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
+        try:
+            response = await self._client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+        except httpx.ReadError as e:
+            logger.error(f"Failed to read from vLLM server at {self.api_base}: {e}")
+            raise RuntimeError(
+                f"Cannot connect to vLLM server at {self.api_base}. "
+                f"Please ensure the server is running and accessible. "
+                f"If not using server mode, set VLLM_API_BASE to empty or None."
+            ) from e
+        except httpx.ConnectError as e:
+            logger.error(f"Failed to connect to vLLM server at {self.api_base}: {e}")
+            raise RuntimeError(
+                f"Cannot connect to vLLM server at {self.api_base}. "
+                f"Please check if the server is running."
+            ) from e
         
         result = response.json()
         choice = result["choices"][0]
