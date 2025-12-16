@@ -389,8 +389,9 @@ fi
 # Enable auto tool choice for function calling support
 # This is required when using tool_choice="auto" in API requests
 VLLM_BASE_CMD="$VLLM_BASE_CMD --enable-auto-tool-choice"
-# Use json parser for tool calls (works with Qwen models)
-VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser json"
+# Use openai parser for tool calls (tools are in OpenAI format)
+# For Qwen3 models, can also try: qwen3_coder or qwen3_xml
+VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser openai"
 
 # Build the command string
 # Check if model requires newer transformers (Qwen3-VL)
