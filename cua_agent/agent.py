@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 
 from cua_agent.config import CUAConfig, GBoxConfig
-from cua_agent.gbox_client import GBoxClient
+from gbox_cua.gbox_client import GBoxClient
 from cua_agent.vlm_inference import VLMInference
 from cua_agent.actions import (
     ActionType,
@@ -17,8 +17,8 @@ from cua_agent.actions import (
     parse_action,
     extract_action_from_response,
 )
-from cua_agent.tools import get_tools_schema, tool_call_to_action_dict
-from cua_agent.prompts import create_system_prompt, create_user_message_with_screenshot
+from gbox_cua.tools import get_tools_schema, tool_call_to_action_dict
+from gbox_cua.prompts import create_system_prompt, create_user_message_with_screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,16 @@ class CUAAgent:
         self.enable_logging = enable_logging
         
         # Initialize clients
-        self.gbox_client = GBoxClient(config.gbox)
+        self.gbox_client = GBoxClient(
+            api_key=config.gbox.api_key,
+            model=config.gbox.model,
+            box_type=config.gbox.box_type,
+            timeout=config.gbox.timeout,
+            wait=config.gbox.wait,
+            expires_in=config.gbox.expires_in,
+            labels=config.gbox.labels,
+            envs=config.gbox.envs,
+        )
         
         # Determine API base and key based on provider
         if config.vlm_provider == "openrouter":
@@ -706,6 +715,13 @@ class CUAAgent:
                 print(f"   🔘 Button press: {action.button}")
             
             await self.gbox_client.press_button(button=action.button or "home")
+        
+        elif action.action_type == ActionType.SLEEP:
+            duration = action.duration or 1.0
+            if verbose:
+                print(f"   ⏳ Sleep: {duration}s")
+            
+            await asyncio.sleep(duration)
     
     def _print_summary(self, rubric: CUARubric):
         """Print task summary."""

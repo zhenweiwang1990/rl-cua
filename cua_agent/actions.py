@@ -19,6 +19,7 @@ class ActionType(str, Enum):
     INPUT = "input"
     KEY_PRESS = "key_press"
     BUTTON_PRESS = "button_press"
+    SLEEP = "sleep"  # Wait for a duration
     TASK_COMPLETE = "task_complete"  # Report task completion
 
 
@@ -108,6 +109,9 @@ class CUAAction:
     # For button_press
     button: Optional[str] = None  # "back", "home", "menu"
     
+    # For sleep
+    duration: Optional[float] = None  # Sleep duration in seconds
+    
     # For task_complete
     success: bool = False
     result_message: Optional[str] = None
@@ -148,6 +152,10 @@ class CUAAction:
         elif self.action_type == ActionType.BUTTON_PRESS:
             if self.button:
                 result["button"] = self.button
+        
+        elif self.action_type == ActionType.SLEEP:
+            if self.duration:
+                result["duration"] = self.duration
         
         elif self.action_type == ActionType.TASK_COMPLETE:
             result["success"] = self.success
@@ -232,6 +240,12 @@ def parse_action(data: Dict[str, Any]) -> CUAAction:
         return CUAAction(
             action_type=action_type,
             button=data.get("button", "home"),
+        )
+    
+    elif action_type == ActionType.SLEEP:
+        return CUAAction(
+            action_type=action_type,
+            duration=data.get("duration", 1.0),
         )
     
     elif action_type == ActionType.TASK_COMPLETE:

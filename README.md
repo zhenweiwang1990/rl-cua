@@ -355,11 +355,16 @@ async with CUAAgent(config) as agent:
 ### GBoxClient
 
 ```python
-from cua_agent import GBoxClient, GBoxConfig
+from gbox_cua.gbox_client import GBoxClient
+from cua_agent.config import GBoxConfig
 
 config = GBoxConfig(api_key="your_key")
 
-async with GBoxClient(config) as client:
+async with GBoxClient(
+    api_key=config.api_key,
+    model=config.model,
+    box_type=config.box_type,
+) as client:
     # Create box
     await client.create_box("android")
     

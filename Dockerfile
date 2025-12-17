@@ -22,6 +22,10 @@ RUN pip install --upgrade pip setuptools wheel
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install git+https://github.com/babelcloud/gbox-sdk-py.git
 
+# ========== GBox CUA (shared code) ==========
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install git+https://github.com/babelcloud/gbox-cua.git
+
 # ========== project ==========
 COPY requirements.txt .
 

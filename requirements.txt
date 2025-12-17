@@ -4,6 +4,9 @@
 # Install from GitHub: pip install git+https://github.com/babelcloud/gbox-sdk-py.git
 # Note: This package may not be on PyPI, install it separately in Dockerfile
 
+# GBox CUA shared code (install from git source)
+git+https://github.com/babelcloud/gbox-cua.git
+
 # Image Processing
 Pillow>=10.0.0
 
