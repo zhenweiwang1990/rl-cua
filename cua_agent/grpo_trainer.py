@@ -225,6 +225,81 @@ class CUAGRPOTrainer:
         logger.info(f"Target accuracy: {self.config.target_accuracy * 100:.1f}%")
         logger.info(f"Output dir: {self.output_dir}")
         logger.info("=" * 60)
+
+    def _reload_vllm_lora_adapter(self, adapter_path: Path) -> None:
+        """Notify vLLM server to load/reload the latest LoRA adapter.
+
+        Uses vLLM's runtime LoRA updating API:
+
+            POST {VLLM_API_BASE}/v1/load_lora_adapter
+            {
+              "lora_name": "...",
+              "lora_path": "/path/to/adapter"
+            }
+
+        Requirements on the vLLM side:
+            - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+            - The adapter_path must be visible inside the vLLM container.
+        """
+        if not self.config.vllm.enable_dynamic_lora:
+            return
+
+        api_base = (self.config.vllm.api_base or "").rstrip("/")
+        if not api_base:
+            logger.warning(
+                "Dynamic LoRA is enabled but VLLM API base is empty. "
+                "Skip notifying vLLM to reload LoRA."
+            )
+            return
+
+        lora_name = self.config.vllm.lora_name or self.config.vllm.base_model
+        if not lora_name:
+            logger.warning(
+                "Dynamic LoRA is enabled but lora_name/base_model is empty. "
+                "Skip notifying vLLM to reload LoRA."
+            )
+            return
+
+        import json as _json
+        import urllib.request as _urllib_request
+
+        url = f"{api_base}/v1/load_lora_adapter"
+        payload = {
+            "lora_name": lora_name,
+            "lora_path": str(adapter_path),
+        }
+        data = _json.dumps(payload).encode("utf-8")
+
+        req = _urllib_request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with _urllib_request.urlopen(req, timeout=10) as resp:
+                status = resp.getcode()
+                if 200 <= status < 300:
+                    logger.info(
+                        "Requested vLLM to load LoRA adapter '%s' from '%s' "
+                        "(status=%s)",
+                        lora_name,
+                        adapter_path,
+                        status,
+                    )
+                else:
+                    logger.warning(
+                        "vLLM load_lora_adapter returned non-2xx status: %s",
+                        status,
+                    )
+        except Exception as e:
+            logger.error(
+                "Failed to notify vLLM to reload LoRA adapter '%s' from '%s': %s",
+                lora_name,
+                adapter_path,
+                e,
+            )
     
     def _load_checkpoint(self, checkpoint_path: Path):
         """Load training state from checkpoint."""
@@ -307,6 +382,8 @@ class CUAGRPOTrainer:
                         f"Synced LoRA adapter to shared path: {adapter_dst} "
                         f"(step={self.global_step})"
                     )
+                    # Notify vLLM to reload / load the latest adapter.
+                    self._reload_vllm_lora_adapter(adapter_dst)
                 else:
                     logger.warning(
                         f"No adapter_model.[safetensors|bin] found in {checkpoint_path}; "
