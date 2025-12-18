@@ -205,13 +205,12 @@ class RewardTracker:
             "total_rollouts": len(self.rewards),
         }
 
-
 async def validate_task_completion(
     task: CUATask,
     gbox_client,
 ) -> bool:
     """Validate task completion using ADB/shell commands via GBox.
-    
+
     We avoid using gbox-handy-1 for validation, and instead:
       1. Execute Android shell commands inside the box (via GBox Command API).
       2. Parse the output to determine whether the target system state matches
@@ -330,7 +329,7 @@ async def validate_task_completion(
             is_enabled = val > 0
             return is_enabled == bool(expected)
 
-        # 9) 蓝牙开关（对应 train_08_enable_bluetooth）
+        # 9) 蓝牙开关（配合 train_08_enable_bluetooth）
         if q == "bluetooth_enabled":
             out = await _run_shell(
                 "settings get global bluetooth_on || "
@@ -348,7 +347,7 @@ async def validate_task_completion(
     except Exception as e:
         logger.error(f"Validation failed for task {task.id}: {e}", exc_info=True)
         return False
-
+        
 def calculate_grpo_advantages(
     rewards: List[float],
     min_std: float = 0.05,

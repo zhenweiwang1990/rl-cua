@@ -141,7 +141,21 @@ class CUAGRPOTrainer:
                 "GBOX_API_KEY is not set. Rollouts will fail until a valid API key is provided."
             )
 
-        # Use vLLM as backend; model name is LoRA name (so vLLM can route to adapter)
+        # Use vLLM as backend; model_name should match the LoRA name that vLLM
+        # exposes via `--enable-lora --lora-modules {lora_name}=/workspace/lora_adapter`.
+        # This allows dynamic rollout: trainer syncs latest LoRA weights into the
+        # shared adapter directory (LORA_PATH), and vLLM always serves `lora_name`.
+        self.lora_path: Optional[Path] = None
+        if self.config.vllm.enable_dynamic_lora and self.config.vllm.lora_path:
+            # Interpret LORA_PATH as a path inside the training container
+            self.lora_path = Path(self.config.vllm.lora_path)
+            self.lora_path.mkdir(parents=True, exist_ok=True)
+        elif self.config.vllm.enable_dynamic_lora:
+            logger.warning(
+                "ENABLE_DYNAMIC_LORA is True but LORA_PATH is not set. "
+                "Dynamic LoRA rollout will be disabled."
+            )
+
         self.standalone_agent = StandaloneGBoxCUAAgent(
             gbox_api_key=gbox_api_key,
             vlm_provider="vllm",
@@ -275,6 +289,31 @@ class CUAGRPOTrainer:
             json.dump(metadata, f, indent=2)
         
         logger.info(f"Checkpoint saved: {checkpoint_path}")
+
+        # If dynamic LoRA rollout is enabled, sync latest adapter weights to the
+        # shared LoRA directory (LORA_PATH). vLLM should mount this path as its
+        # LoRA adapter directory (e.g., /workspace/lora_adapter).
+        if self.config.vllm.enable_dynamic_lora and self.lora_path is not None:
+            try:
+                adapter_src = checkpoint_path / "adapter_model.safetensors"
+                if not adapter_src.exists():
+                    adapter_src = checkpoint_path / "adapter_model.bin"
+                if adapter_src.exists():
+                    self.lora_path.mkdir(parents=True, exist_ok=True)
+                    import shutil as _shutil
+                    adapter_dst = self.lora_path / adapter_src.name
+                    _shutil.copy2(adapter_src, adapter_dst)
+                    logger.info(
+                        f"Synced LoRA adapter to shared path: {adapter_dst} "
+                        f"(step={self.global_step})"
+                    )
+                else:
+                    logger.warning(
+                        f"No adapter_model.[safetensors|bin] found in {checkpoint_path}; "
+                        "dynamic LoRA sync skipped."
+                    )
+            except Exception as e:
+                logger.error(f"Failed to sync LoRA adapter to {self.lora_path}: {e}")
         
         # If best model, also save to best_model directory
         if is_best:

@@ -72,6 +72,9 @@ class VLLMConfig:
     # Model names
     base_model: str = "unsloth/Qwen3-VL-32B-Instruct"
     lora_name: str = "cua_agent_lora"  # Name registered with vLLM
+    # Shared LoRA adapter directory (host path), mounted into vLLM container.
+    # Trainer will sync latest LoRA weights into this directory for dynamic rollout.
+    lora_path: Optional[str] = None
     
     # Inference settings
     max_tokens: int = 2048
@@ -94,6 +97,7 @@ class VLLMConfig:
             api_key=os.environ.get("VLLM_API_KEY"),
             base_model=os.environ.get("BASE_MODEL", "unsloth/Qwen3-VL-32B-Instruct"),
             lora_name=os.environ.get("LORA_NAME", "cua_agent_lora"),
+            lora_path=os.environ.get("LORA_PATH"),
             max_tokens=get_env_int("MAX_TOKENS", "2048"),
             temperature=get_env_float("TEMPERATURE", "0.7"),
             top_p=get_env_float("TOP_P", "0.9"),

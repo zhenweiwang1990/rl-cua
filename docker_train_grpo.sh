@@ -141,6 +141,8 @@ docker run -d \
   -v "$SCRIPT_DIR/outputs:/workspace/outputs" \
   -e GBOX_API_KEY="$GBOX_API_KEY" \
   -e VLLM_API_BASE="${VLLM_API_BASE:-}" \
+  -e LORA_PATH="${LORA_PATH:-}" \
+  -e LORA_NAME="${LORA_NAME:-cua_agent_lora}" \
   -e MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}" \
   -e BOX_TYPE="${BOX_TYPE:-android}" \
   -e MAX_TURNS="${MAX_TURNS:-20}" \
@@ -148,7 +150,7 @@ docker run -d \
   ${CUDA_VISIBLE_DEVICES:+-e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"} \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   "$IMAGE_NAME" \
-  bash -lc "cd /workspace && python train_grpo_cua.py ${MODE_ARGS[*]}"
+  bash -lc "cd /workspace && python init_lora_adapter.py && python train_grpo_cua.py ${MODE_ARGS[*]}"
 
 echo ""
 echo "✓ Training container started."
