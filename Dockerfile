@@ -18,14 +18,6 @@ RUN apt-get update && apt-get install -y \
 # ========== python ==========
 RUN pip install --upgrade pip setuptools wheel
 
-# ========== GBox ==========
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install git+https://github.com/babelcloud/gbox-sdk-py.git
-
-# ========== GBox CUA (shared code) ==========
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install git+https://github.com/babelcloud/gbox-cua.git
-
 # ========== project ==========
 COPY requirements.txt .
 
@@ -40,6 +32,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Note: Unsloth is installed from GitHub. Requires a GPU-enabled environment.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+
+# ========== GBox ==========
+RUN  pip install git+https://github.com/babelcloud/gbox-sdk-py.git
+
+# ========== GBox CUA (shared code) ==========
+RUN pip install git+https://github.com/babelcloud/gbox-cua.git
 
 COPY . .
 
