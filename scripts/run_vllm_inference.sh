@@ -1,6 +1,17 @@
 #!/bin/bash
 set -e
 
+# Load .env from project root if present (so MODEL_NAME and others work without manual export)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$PROJECT_ROOT/.env"
+    set +a
+    echo "✓ Loaded .env from $PROJECT_ROOT"
+fi
+
 echo "=========================================="
 echo "vLLM Inference Server - LoRA VLM Model"
 echo "(Interactive Mode)"
