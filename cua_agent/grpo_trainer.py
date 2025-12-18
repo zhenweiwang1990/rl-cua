@@ -431,13 +431,30 @@ class CUAGRPOTrainer:
         tasks: List[CUATask],
         is_eval: bool = False,
     ) -> List[TrajectoryGroup]:
-        """Collect rollouts for a batch of tasks using gbox-cua's standalone agent."""
+        """Collect rollouts for a batch of tasks using gbox-cua's standalone agent.
+
+        When detailed logging is enabled, this prints rich, step-by-step rollout logs
+        similar to rl-qwen3:
+          - Per-task / per-group headers
+          - Per-rollout summary (reward, success, num_turns)
+          - Per-action tool call details from `action_history`
+        """
         groups: List[TrajectoryGroup] = []
 
         num_rollouts = 1 if is_eval else self.config.rollout.num_rollouts
 
         for group_id, task in enumerate(tasks):
             group = TrajectoryGroup(task=task, group_id=group_id)
+
+            if self.config.enable_detailed_logging:
+                print("\n" + "-" * 80, flush=True)
+                phase = "EVAL" if is_eval else "TRAIN"
+                print(
+                    f"[{phase}] Task Group {group_id} | Task ID={task.id} | "
+                    f"Rollouts={num_rollouts}",
+                    flush=True,
+                )
+                print(f"Description: {task.description}", flush=True)
 
             for rollout_idx in range(num_rollouts):
                 try:
@@ -447,6 +464,14 @@ class CUAGRPOTrainer:
                         box_type="android",
                         verbose=self.config.verbose,
                     )
+
+                    if self.config.enable_detailed_logging:
+                        phase = "EVAL" if is_eval else "TRAIN"
+                        print(
+                            f"\n[{phase}] Rollout {rollout_idx + 1}/{num_rollouts} "
+                            f"for Task {task.id}",
+                            flush=True,
+                        )
 
                     # Copy conversation from agent state
                     conversation = deepcopy(self.standalone_agent.conversation)
@@ -467,6 +492,43 @@ class CUAGRPOTrainer:
                     )
                     reward = simple_reward_function(rollout_result, task)
 
+                    if self.config.enable_detailed_logging:
+                        print(
+                            f"  ↳ Rollout summary: "
+                            f"completed={rollout_result.task_completed}, "
+                            f"success={rollout_result.task_success}, "
+                            f"num_turns={rollout_result.num_turns}, "
+                            f"reward={reward:.3f}",
+                            flush=True,
+                        )
+                        if errors:
+                            print(f"  ↳ Errors ({len(errors)}):", flush=True)
+                            for e in errors:
+                                print(f"      - {e}", flush=True)
+
+                        # Detailed tool / action history
+                        if action_history:
+                            print("  ↳ Action history:", flush=True)
+                            for step_idx, step in enumerate(action_history, start=1):
+                                try:
+                                    action_type = step.get("action") or step.get("type") or "unknown"
+                                    success = step.get("success", True)
+                                    error = step.get("error")
+                                    tool_name = step.get("tool_name") or step.get("tool") or ""
+                                    summary_parts = [
+                                        f"step={step_idx}",
+                                        f"action={action_type}",
+                                        f"success={success}",
+                                    ]
+                                    if tool_name:
+                                        summary_parts.append(f"tool={tool_name}")
+                                    if error:
+                                        summary_parts.append(f"error={error}")
+                                    print("      " + " | ".join(summary_parts), flush=True)
+                                except Exception:
+                                    # Fallback: best-effort print of raw step dict
+                                    print(f"      step={step_idx}: {step}", flush=True)
+
                     sample = TrajectorySample(
                         task_id=task.id,
                         task=task,
@@ -485,6 +547,21 @@ class CUAGRPOTrainer:
                     continue
 
             if group.samples:
+                if self.config.enable_detailed_logging:
+                    rewards = [s.reward for s in group.samples]
+                    successes = [
+                        s.metadata.get("rollout_result", {}).get("task_success", False)
+                        for s in group.samples
+                    ]
+                    avg_reward = float(np.mean(rewards)) if rewards else 0.0
+                    success_rate = float(np.mean(successes)) if successes else 0.0
+                    print(
+                        f"\n[GROUP STATS] Task {task.id} | "
+                        f"Rollouts={len(group.samples)} | "
+                        f"avg_reward={avg_reward:.3f} | "
+                        f"success_rate={success_rate:.2%}",
+                        flush=True,
+                    )
                 groups.append(group)
 
         return groups
@@ -715,6 +792,24 @@ class CUAGRPOTrainer:
                 name=f"cua-grpo-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 config=self.config.to_dict(),
             )
+
+        # Baseline evaluation before training (like rl-qwen3 flow)
+        print("\n📊 Running baseline evaluation before training...", flush=True)
+        baseline_metrics = self._run_evaluation()
+        print(
+            f"   Baseline accuracy = {baseline_metrics.accuracy:.2%}, "
+            f"avg_reward = {baseline_metrics.avg_reward:.3f}",
+            flush=True,
+        )
+        if self.use_wandb:
+            wandb.log(
+                {
+                    "baseline/accuracy": baseline_metrics.accuracy,
+                    "baseline/avg_reward": baseline_metrics.avg_reward,
+                    "baseline/reward_std": baseline_metrics.reward_std,
+                },
+                step=self.global_step,
+            )
         
         task_idx = 0
         loop = asyncio.get_event_loop()
@@ -722,6 +817,13 @@ class CUAGRPOTrainer:
         for step in range(self.global_step, self.config.max_steps):
             self.global_step = step + 1
             step_start = time.time()
+
+            print("\n" + "=" * 80, flush=True)
+            print(
+                f"STEP {self.global_step}/{self.config.max_steps}",
+                flush=True,
+            )
+            print("=" * 80, flush=True)
             
             # Get batch of tasks
             batch_tasks = []
@@ -731,10 +833,16 @@ class CUAGRPOTrainer:
             
             # Collect rollouts
             rollout_start = time.time()
+            print(
+                f"🎯 COLLECTING ROLLOUTS "
+                f"({len(batch_tasks)} tasks × {self.config.rollout.num_rollouts} rollouts)...",
+                flush=True,
+            )
             groups = loop.run_until_complete(self._collect_rollouts(batch_tasks))
             rollout_time = time.time() - rollout_start
             
             # Compute advantages
+            print("📐 Computing GRPO advantages for trajectory groups...", flush=True)
             groups, groups_kept, groups_filtered = self._compute_advantages(groups)
             
             # Training step
@@ -793,12 +901,13 @@ class CUAGRPOTrainer:
             
             # Log progress
             print(
-                f"Step {self.global_step}/{self.config.max_steps} | "
-                f"Loss: {metrics.loss:.4f} | "
-                f"Accuracy: {metrics.accuracy:.2%} | "
-                f"Reward: {metrics.avg_reward:.3f} | "
-                f"Rollout: {rollout_time:.1f}s | "
-                f"Train: {train_time:.1f}s",
+                f"✅ Step {self.global_step}/{self.config.max_steps} | "
+                f"Loss={metrics.loss:.4f} | "
+                f"Accuracy={metrics.accuracy:.2%} | "
+                f"Reward={metrics.avg_reward:.3f} | "
+                f"Rollout={rollout_time:.1f}s | "
+                f"Train={train_time:.1f}s | "
+                f"Groups kept={groups_kept} / {groups_kept + groups_filtered}",
                 flush=True
             )
             
