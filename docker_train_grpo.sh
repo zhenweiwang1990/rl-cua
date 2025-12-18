@@ -72,34 +72,37 @@ fi
 TRAIN_GPU_DEVICES="${TRAIN_GPU_DEVICES:-all}"
 
 # Parse GPU devices for Docker --gpus flag
+# Use --gpus all for better compatibility (especially for newer GPUs like B200)
+# Then use CUDA_VISIBLE_DEVICES to limit which GPUs are visible to the application
 if [ "$TRAIN_GPU_DEVICES" = "all" ]; then
   GPU_FLAG="all"
   CUDA_VISIBLE_DEVICES=""
 else
-  # Convert to Docker format: "device=4" or "device=4,5,6,7"
+  # Always use --gpus all for Docker, then limit via CUDA_VISIBLE_DEVICES
+  GPU_FLAG="all"
+  # Convert to CUDA_VISIBLE_DEVICES format
   if [[ "$TRAIN_GPU_DEVICES" =~ ^[0-9]+$ ]]; then
-    GPU_FLAG="device=$TRAIN_GPU_DEVICES"
     CUDA_VISIBLE_DEVICES="$TRAIN_GPU_DEVICES"
   elif [[ "$TRAIN_GPU_DEVICES" =~ ^[0-9]+-[0-9]+$ ]]; then
     START_GPU=$(echo "$TRAIN_GPU_DEVICES" | cut -d'-' -f1)
     END_GPU=$(echo "$TRAIN_GPU_DEVICES" | cut -d'-' -f2)
     GPU_LIST=$(seq -s, $START_GPU $END_GPU)
-    GPU_FLAG="device=$GPU_LIST"
     CUDA_VISIBLE_DEVICES="$GPU_LIST"
   elif [[ "$TRAIN_GPU_DEVICES" =~ ^[0-9]+(,[0-9]+)+$ ]]; then
-    GPU_FLAG="device=$TRAIN_GPU_DEVICES"
     CUDA_VISIBLE_DEVICES="$TRAIN_GPU_DEVICES"
   else
     echo "⚠ Invalid TRAIN_GPU_DEVICES format: $TRAIN_GPU_DEVICES. Using all GPUs."
-    GPU_FLAG="all"
     CUDA_VISIBLE_DEVICES=""
   fi
 fi
 
 echo "GPU Configuration:"
 echo "  - Training GPUs: $TRAIN_GPU_DEVICES"
+echo "  - Docker --gpus flag: $GPU_FLAG"
 if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
   echo "  - CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+else
+  echo "  - CUDA_VISIBLE_DEVICES: (not set, will use all available GPUs)"
 fi
 
 # Check if single GPU and warn about memory
@@ -147,7 +150,7 @@ docker run -d \
   -e BOX_TYPE="${BOX_TYPE:-android}" \
   -e MAX_TURNS="${MAX_TURNS:-20}" \
   -e OUTPUT_DIR="${OUTPUT_DIR:-outputs/grpo_cua}" \
-  ${CUDA_VISIBLE_DEVICES:+-e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"} \
+  -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   "$IMAGE_NAME" \
   bash -lc "cd /workspace && python init_lora_adapter.py && python train_grpo_cua.py ${MODE_ARGS[*]}"
