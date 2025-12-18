@@ -114,4 +114,6 @@ echo "To resume training later (auto-resume from latest checkpoint):"
 echo "  ./docker_train_grpo.sh"
 echo ""
 
+docker logs -f $CONTAINER_NAME
+
 

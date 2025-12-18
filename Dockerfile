@@ -32,6 +32,11 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# ========== Unsloth (for GRPO LoRA training) ==========
+# Note: Unsloth is installed from GitHub. Requires a GPU-enabled environment.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+
 COPY . .
 
 RUN mkdir -p /workspace/logs /workspace/outputs
