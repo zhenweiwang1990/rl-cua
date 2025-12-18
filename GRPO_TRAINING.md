@@ -1,0 +1,269 @@
+# CUA Agent GRPO Training Guide
+
+This guide explains how to train the CUA (Computer Use Agent) using GRPO (Group Relative Policy Optimization) with the AReaL-inspired framework.
+
+## Overview
+
+The GRPO training system enables training a vision-language model to control an Android device through multi-step interactions. Key features:
+
+- **Multi-GPU vLLM Inference**: Uses vLLM for efficient parallel rollout collection
+- **Dynamic LoRA Switching**: Updates LoRA adapters during training without restarting vLLM
+- **Checkpoint & Resume**: Saves checkpoints with full training state for resumption
+- **Detailed Logging**: Integrates with Weights & Biases for experiment tracking
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    GRPO Training Loop                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1. Sample batch of tasks                                    │
+│  2. For each task, collect N rollouts:                       │
+│     ┌─────────────────────────────────────────────────────┐ │
+│     │  vLLM Server (Multi-GPU)                            │ │
+│     │  ├── Base Model: Qwen3-VL-32B                       │ │
+│     │  └── LoRA Adapter: cua_agent_lora                   │ │
+│     │                                                      │ │
+│     │  GBox Android Box                                    │ │
+│     │  ├── Take screenshot                                 │ │
+│     │  ├── Execute action                                  │ │
+│     │  └── Validate completion                             │ │
+│     └─────────────────────────────────────────────────────┘ │
+│  3. Compute GRPO advantages (group-relative)                 │
+│  4. Train LoRA with token-level masking                     │
+│  5. Update vLLM LoRA adapter (if enabled)                   │
+│  6. Evaluate and checkpoint                                  │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Prerequisites
+
+1. **Python Environment** (Python 3.10+)
+```bash
+pip install -r requirements.txt
+
+# Install Unsloth for efficient LoRA training
+pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+```
+
+2. **GBox API Key**
+Get your API key from https://gbox.ai and set it in `.env`:
+```bash
+GBOX_API_KEY=your_gbox_api_key
+```
+
+3. **GPU Requirements**
+- Minimum: 1 GPU with 24GB VRAM for 4-bit quantized training
+- Recommended: 2+ GPUs for tensor parallel vLLM inference
+
+## Quick Start
+
+### 1. Start vLLM Server for Rollouts
+
+```bash
+# Start vLLM with base model (no LoRA initially)
+./scripts/run_vllm_training.sh
+
+# Or with specific GPUs
+GPU_DEVICES=0-3 ./scripts/run_vllm_training.sh
+```
+
+### 2. Start Training
+
+```bash
+# Basic training
+python train_grpo_cua.py
+
+# With custom configuration
+BATCH_SIZE=8 MAX_STEPS=500 python train_grpo_cua.py
+
+# Resume from checkpoint
+python train_grpo_cua.py --resume
+
+# Resume from best checkpoint
+python train_grpo_cua.py --resume_best
+```
+
+## Configuration
+
+All configuration is done via environment variables. Copy `env.example` to `.env` and modify:
+
+```bash
+cp env.example .env
+# Edit .env with your settings
+```
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MODEL_NAME` | `unsloth/Qwen3-VL-32B-Instruct` | Base VLM model |
+| `LEARNING_RATE` | `1e-5` | Learning rate |
+| `BATCH_SIZE` | `4` | Tasks per batch |
+| `NUM_ROLLOUTS` | `4` | Rollouts per task (GRPO group) |
+| `MAX_STEPS` | `200` | Total training steps |
+| `TARGET_ACCURACY` | `0.80` | Target success rate |
+| `LORA_R` | `16` | LoRA rank |
+
+See `env.example` for full configuration options.
+
+## Training Tasks
+
+The training uses 10 sample Android tasks:
+
+### Training Tasks (8)
+1. **Open Settings** - Launch Settings app
+2. **Enable WiFi** - Turn on WiFi
+3. **Maximum Brightness** - Set brightness to max
+4. **Open Chrome** - Launch Chrome browser
+5. **Enable Airplane Mode** - Turn on airplane mode
+6. **Check Battery** - Navigate to battery info
+7. **Go Home** - Return to home screen
+8. **Scroll Settings** - Scroll to find "About phone"
+
+### Evaluation Tasks (2)
+1. **Display Timeout** - Change screen timeout
+2. **Do Not Disturb** - Enable DND mode
+
+### Adding Custom Tasks
+
+Edit `cua_agent/tasks.py` to add new tasks:
+
+```python
+CUATask(
+    id="custom_task_01",
+    name="My Custom Task",
+    description="Description of what to do",
+    difficulty=TaskDifficulty.MEDIUM,
+    category=TaskCategory.SETTINGS,
+    max_steps=10,
+    validation_type="state",
+    validation_query="some_state",
+    expected_result="expected_value",
+)
+```
+
+## Reward Function
+
+The default reward function is simple binary:
+- **1.0**: Task completed successfully
+- **0.1**: Task marked complete but failed
+- **0.0**: Task not completed (timeout)
+
+Modify `cua_agent/reward.py` for custom reward shaping.
+
+## GRPO Algorithm
+
+GRPO (Group Relative Policy Optimization) computes advantages relative to the group:
+
+```
+advantage_i = (reward_i - mean(group_rewards)) / std(group_rewards)
+```
+
+This ensures:
+- High variance groups have meaningful gradients
+- Low variance groups are filtered out (`min_group_std=0.05`)
+- Only assistant turns contribute to the loss
+
+## Dynamic LoRA Switching
+
+When `ENABLE_DYNAMIC_LORA=true`:
+1. After every `LORA_UPDATE_STEPS` training steps
+2. The current LoRA weights are saved to a temp directory
+3. vLLM server is notified to reload the adapter
+4. Subsequent rollouts use the updated policy
+
+This enables on-policy training without restarting the server.
+
+## Checkpoints
+
+Checkpoints are saved to `OUTPUT_DIR/checkpoints/`:
+
+```
+outputs/grpo_cua/
+├── checkpoints/
+│   ├── checkpoint-10/
+│   │   ├── adapter_model.safetensors
+│   │   ├── adapter_config.json
+│   │   ├── training_state.json
+│   │   └── training_metadata.json
+│   └── checkpoint-20/
+├── best_model/
+│   └── ... (copy of best checkpoint)
+├── final/
+│   └── ... (final model after training)
+└── logs/
+    └── ... (detailed logs if enabled)
+```
+
+### Resume Training
+
+```bash
+# Auto-resume from latest checkpoint
+python train_grpo_cua.py
+
+# Resume from specific checkpoint
+python train_grpo_cua.py --resume_from_checkpoint outputs/grpo_cua/checkpoints/checkpoint-50
+
+# Resume from best checkpoint
+python train_grpo_cua.py --resume_best
+```
+
+## Monitoring
+
+### Weights & Biases
+
+Set `ENABLE_WANDB=true` and your W&B credentials:
+
+```bash
+wandb login
+WANDB_PROJECT=cua-grpo python train_grpo_cua.py
+```
+
+Tracked metrics:
+- `train/loss`, `train/policy_loss`
+- `train/avg_reward`, `train/accuracy`
+- `train/rollout_time`, `train/training_time`
+- `eval/accuracy`, `eval/avg_reward`
+
+### Console Output
+
+```
+Step 10/200 | Loss: 0.2345 | Accuracy: 25.00% | Reward: 0.250 | Rollout: 45.3s | Train: 2.1s
+
+📊 Eval Step 10: Accuracy=30.00%, Reward=0.300
+
+🎯 New best accuracy: 30.00%
+```
+
+## Troubleshooting
+
+### Out of Memory
+
+1. Reduce `MAX_SEQ_LENGTH` (default: 16384)
+2. Enable `LOAD_IN_4BIT=true`
+3. Reduce `BATCH_SIZE`
+4. Use fewer `NUM_ROLLOUTS`
+
+### vLLM Connection Failed
+
+1. Check vLLM server is running: `docker logs vllm-cua-training`
+2. Verify API endpoint: `curl http://localhost:8000/v1/models`
+3. Check `VLLM_API_BASE` in your `.env`
+
+### Low Reward/Accuracy
+
+1. Increase `NUM_ROLLOUTS` for better advantage estimation
+2. Increase `MAX_TURNS` for complex tasks
+3. Review task descriptions for clarity
+4. Check GBox connection and box creation
+
+## References
+
+- [AReaL Documentation](https://inclusionai.github.io/AReaL/)
+- [GRPO Algorithm (DeepSeekMath)](https://arxiv.org/abs/2402.03300)
+- [GBox Documentation](https://docs.gbox.ai)
+- [vLLM Documentation](https://docs.vllm.ai)
+

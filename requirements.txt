@@ -13,18 +13,38 @@ Pillow>=10.0.0
 # HTTP Client
 httpx>=0.25.0
 aiohttp>=3.9.0
+openai>=1.20.0  # For vLLM OpenAI-compatible API
 
 # Utilities
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
 
-# Optional but recommended
+# Core ML/DL (required for training)
 numpy>=1.24.0
+torch>=2.0.0
+datasets>=2.14.0
 
-# Note: vLLM, PyTorch, transformers are NOT required for agent code
+# RL Training
+trl>=0.8.0  # Hugging Face TRL for GRPO
+peft>=0.9.0  # Parameter-Efficient Fine-Tuning
+safetensors>=0.4.0  # For loading model weights
+
+# Logging & Monitoring
+wandb>=0.16.0  # Weights & Biases integration
+tqdm>=4.65.0
+
+# Unsloth for efficient training (optional but recommended)
+# pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+# Note: Unsloth needs special installation, see README
+
+# Note: For GRPO training, you need:
+# 1. vLLM server running for rollout collection
+# 2. GBox API key for Android box environments
+# 3. Sufficient GPU memory for LoRA training
+
+# For inference only (no training):
 # Agent supports two modes:
 # 1. Server mode: Connect to external vLLM server via VLLM_API_BASE
 # 2. OpenRouter mode: Use OpenRouter API via OPENROUTER_API_KEY
-# If you need local vLLM inference, install vllm separately
 
