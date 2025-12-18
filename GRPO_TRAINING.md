@@ -55,36 +55,131 @@ GBOX_API_KEY=your_gbox_api_key
 ```
 
 3. **GPU Requirements**
-- Minimum: 1 GPU with 24GB VRAM for 4-bit quantized training
-- Recommended: 2+ GPUs for tensor parallel vLLM inference
+- **Single GPU Setup** (24GB+ VRAM recommended):
+  - vLLM and training share the same GPU
+  - Requires careful memory management (see `SINGLE_GPU_SETUP.md`)
+- **Multi-GPU Setup** (Recommended for production):
+  - **8-GPU Setup (e.g., B200 x8)** - See `MULTI_GPU_SETUP.md` for details:
+    - Option A: vLLM uses 4 GPUs (0-3), Training uses 4 GPUs (4-7) - **Recommended**
+    - Option B: vLLM uses 2 GPUs (0-1), Training uses 6 GPUs (2-7)
+    - Option C: vLLM uses 1 GPU (0), Training uses 7 GPUs (1-7)
+  - **Important**: vLLM and training should use **separate GPUs** to avoid OOM errors
 
 ## Quick Start
 
 ### 1. Start vLLM Server for Rollouts
 
+**For 8-GPU setup (e.g., B200 x8):**
+
 ```bash
-# Start vLLM with base model (no LoRA initially)
+# Option A: vLLM uses 4 GPUs (0-3), Training uses 4 GPUs (4-7)
+# Recommended for large models (30B+)
+GPU_DEVICES=0-3 \
+TENSOR_PARALLEL_SIZE=4 \
+GPU_MEMORY_UTILIZATION=0.85 \
 ./scripts/run_vllm_training.sh
 
-# Or with specific GPUs
-GPU_DEVICES=0-3 ./scripts/run_vllm_training.sh
+# Option B: vLLM uses 2 GPUs (0-1), Training uses 6 GPUs (2-7)
+# Good balance for medium models
+GPU_DEVICES=0-1 \
+TENSOR_PARALLEL_SIZE=2 \
+GPU_MEMORY_UTILIZATION=0.85 \
+./scripts/run_vllm_training.sh
+
+# With initial LoRA adapter
+LORA_PATH=outputs/grpo_cua/best_model \
+GPU_DEVICES=0-3 \
+TENSOR_PARALLEL_SIZE=4 \
+./scripts/run_vllm_training.sh
 ```
 
-### 2. Start Training
+### 2. Start Training (Docker - Recommended)
+
+**Important**: Use different GPUs than vLLM to avoid OOM errors.
+
+**For 8-GPU setup:**
 
 ```bash
-# Basic training
-python train_grpo_cua.py
+# Option A: Training uses GPUs 4-7 (separate from vLLM's 0-3)
+# Best for parallel execution
+TRAIN_GPU_DEVICES=4-7 ./docker_train_grpo.sh
 
-# With custom configuration
-BATCH_SIZE=8 MAX_STEPS=500 python train_grpo_cua.py
+# Option B: Training uses GPUs 2-7 (if vLLM uses 0-1)
+TRAIN_GPU_DEVICES=2-7 ./docker_train_grpo.sh
+
+# Option C: Single GPU training (if using 4-bit quantization)
+TRAIN_GPU_DEVICES=4 ./docker_train_grpo.sh
 
 # Resume from checkpoint
-python train_grpo_cua.py --resume
+TRAIN_GPU_DEVICES=4-7 ./docker_train_grpo.sh --resume
 
 # Resume from best checkpoint
-python train_grpo_cua.py --resume_best
+TRAIN_GPU_DEVICES=4-7 ./docker_train_grpo.sh --resume_best
 ```
+
+### 2b. Start Training (Local - Alternative)
+
+If running locally without Docker:
+
+```bash
+# Set CUDA_VISIBLE_DEVICES to use different GPUs than vLLM
+CUDA_VISIBLE_DEVICES=4,5,6,7 python train_grpo_cua.py
+
+# With custom configuration
+CUDA_VISIBLE_DEVICES=4 BATCH_SIZE=8 MAX_STEPS=500 python train_grpo_cua.py
+
+# Resume from checkpoint
+CUDA_VISIBLE_DEVICES=4 python train_grpo_cua.py --resume
+```
+
+### Single GPU Configuration
+
+If you only have **one GPU**, you need to carefully manage memory between vLLM and training:
+
+**Step 1: Start vLLM with low memory utilization**
+
+```bash
+# Use only 40-50% of GPU memory for vLLM (leave room for training)
+GPU_MEMORY_UTILIZATION=0.45 \
+GPU_DEVICES=0 \
+MAX_MODEL_LEN=8192 \
+./scripts/run_vllm_training.sh
+```
+
+**Step 2: Start training (shares GPU 0 with vLLM)**
+
+```bash
+# Training will use the remaining GPU memory
+# Make sure LOAD_IN_4BIT=true in .env (already default)
+TRAIN_GPU_DEVICES=0 ./docker_train_grpo.sh
+```
+
+**Additional optimizations for single GPU:**
+
+1. **Use a smaller model** (if available):
+   ```bash
+   MODEL_NAME=unsloth/Qwen3-VL-8B-Instruct  # Instead of 30B/32B
+   ```
+
+2. **Reduce vLLM memory** in `.env`:
+   ```bash
+   # Lower memory utilization
+   GPU_MEMORY_UTILIZATION=0.4  # Use only 40% of GPU
+   MAX_MODEL_LEN=8192          # Reduce max sequence length
+   ```
+
+3. **Reduce training batch size**:
+   ```bash
+   BATCH_SIZE=2                # Smaller batches
+   NUM_ROLLOUTS=2              # Fewer rollouts per task
+   ```
+
+4. **Enable gradient checkpointing** (already enabled via Unsloth)
+
+**Note**: With single GPU, training will be slower as vLLM and training compete for GPU resources. Consider:
+- Running vLLM and training at different times (not recommended for GRPO)
+- Using a smaller model (8B instead of 30B/32B)
+- Upgrading to multiple GPUs for better performance
 
 ## Configuration
 
