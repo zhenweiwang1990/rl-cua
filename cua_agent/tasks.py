@@ -164,19 +164,18 @@ TRAINING_TASKS = [
         expected_result=True,
         tags=["navigation", "home"],
     ),
-    
-    # Task 8: Scroll down in Settings
+    # Task 8: Enable Bluetooth
     CUATask(
-        id="train_08_scroll_settings",
-        name="Scroll Down in Settings",
-        description="Open Settings and scroll down to find 'About phone' option.",
+        id="train_08_enable_bluetooth",
+        name="Enable Bluetooth",
+        description="Go to Settings and turn on Bluetooth if it's off.",
         difficulty=TaskDifficulty.MEDIUM,
-        category=TaskCategory.NAVIGATION,
-        max_steps=10,
+        category=TaskCategory.SETTINGS,
+        max_steps=8,
         validation_type="state",
-        validation_query="visible_elements",
-        expected_result="about",
-        tags=["navigation", "scroll", "settings"],
+        validation_query="bluetooth_enabled",
+        expected_result=True,
+        tags=["settings", "bluetooth", "toggle"],
     ),
 ]
 

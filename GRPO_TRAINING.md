@@ -60,7 +60,7 @@ GBOX_API_KEY=your_gbox_api_key
   - Requires careful memory management (see `SINGLE_GPU_SETUP.md`)
 - **Multi-GPU Setup** (Recommended for production):
   - **8-GPU Setup (e.g., B200 x8)** - See `MULTI_GPU_SETUP.md` for details:
-    - Option A: vLLM uses 4 GPUs (0-3), Training uses 4 GPUs (4-7) - **Recommended**
+    - Option A: vLLM uses 7 GPUs (0-6), Training uses 1 GPUs (7) - **Recommended**
     - Option B: vLLM uses 2 GPUs (0-1), Training uses 6 GPUs (2-7)
     - Option C: vLLM uses 1 GPU (0), Training uses 7 GPUs (1-7)
   - **Important**: vLLM and training should use **separate GPUs** to avoid OOM errors

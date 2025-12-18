@@ -210,56 +210,144 @@ async def validate_task_completion(
     task: CUATask,
     gbox_client,
 ) -> bool:
-    """Validate task completion using GBox state APIs.
+    """Validate task completion using ADB/shell commands via GBox.
     
-    This is a simplified implementation. In production, you would
-    implement specific validation logic for each task type.
-    
-    Args:
-        task: The task to validate
-        gbox_client: GBox client for state queries
-        
-    Returns:
-        True if validation passes
+    We avoid using gbox-handy-1 for validation, and instead:
+      1. Execute Android shell commands inside the box (via GBox Command API).
+      2. Parse the output to determine whether the target system state matches
+         the expected result (e.g., WiFi on/off, current app, screen timeout).
     """
+
+    async def _run_shell(cmd: str) -> str:
+        """Run a shell command inside the box via GBox SDK and return stdout."""
+        sdk = getattr(gbox_client, "_sdk", None)
+        box_id = getattr(gbox_client, "box_id", None)
+        if sdk is None or not box_id:
+            raise RuntimeError("gbox_client must provide `_sdk` and `box_id` for command execution")
+
+        try:
+            result = sdk.client.post(
+                f"/boxes/{box_id}/command",
+                cast_to=dict,
+                body={"command": cmd},
+            )
+            if isinstance(result, dict):
+                out = result.get("stdout") or result.get("output") or ""
+                return str(out)
+            return str(result)
+        except Exception as e:
+            logger.error(f"Failed to run shell command '{cmd}': {e}")
+            return ""
+
     try:
-        # Get current device state
-        # Note: This depends on GBox API capabilities
-        # For now, we'll use a simplified approach
-        
-        if task.validation_type == "state":
-            # Query device state
-            # This would need to be implemented based on GBox API
-            if task.validation_query == "current_app":
-                # Check current foreground app
-                # state = await gbox_client.get_current_app()
-                # return state == task.expected_result
-                return True  # Placeholder
-            
-            elif task.validation_query == "wifi_enabled":
-                # Check WiFi state
-                return True  # Placeholder
-            
-            elif task.validation_query == "is_home_screen":
-                # Check if on home screen
-                return True  # Placeholder
-            
-            # Add more validation cases as needed
-        
-        elif task.validation_type == "screenshot":
-            # Validate based on screenshot analysis
-            return True  # Placeholder
-        
-        elif task.validation_type == "api":
-            # Call specific API for validation
-            return True  # Placeholder
-        
-        return False
-        
-    except Exception as e:
-        logger.error(f"Validation failed for task {task.id}: {e}")
+        q = (task.validation_query or "").lower()
+        expected = task.expected_result
+
+        # 1) 当前前台 App (Settings / Chrome 等)
+        if q == "current_app":
+            out = await _run_shell(
+                "dumpsys window | grep mCurrentFocus || "
+                "dumpsys activity | grep mResumedActivity"
+            )
+            if not out:
+                return False
+            if isinstance(expected, str) and expected:
+                return expected in out
+            return "mCurrentFocus" in out or "mResumedActivity" in out
+
+        # 2) WiFi 开关
+        if q == "wifi_enabled":
+            out = await _run_shell("settings get global wifi_on")
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            return bool(val) == bool(expected)
+
+        # 3) 飞行模式
+        if q == "airplane_mode":
+            out = await _run_shell("settings get global airplane_mode_on")
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            return bool(val) == bool(expected)
+
+        # 4) 亮度
+        if q == "brightness_level":
+            out = await _run_shell("settings get system screen_brightness")
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            return val == int(expected) if isinstance(expected, int) else False
+
+        # 5) 当前 Activity（比如电池页）
+        if q == "current_activity":
+            out = await _run_shell(
+                "dumpsys window | grep mCurrentFocus || "
+                "dumpsys activity | grep mResumedActivity"
+            )
+            if not out:
+                return False
+            if isinstance(expected, str) and expected:
+                return expected.lower() in out.lower()
+            return False
+
+        # 6) 是否在桌面
+        if q == "is_home_screen":
+            out = await _run_shell(
+                "dumpsys window | grep mCurrentFocus || "
+                "dumpsys activity | grep mResumedActivity"
+            )
+            if not out:
+                return False
+            lowered = out.lower()
+            is_home = (
+                "launcher" in lowered
+                or "home" in lowered
+                or "com.android.launcher" in lowered
+                or "launcher3" in lowered
+            )
+            return is_home == bool(expected)
+
+        # 7) 屏幕熄屏时间 (ms)
+        if q == "screen_timeout":
+            out = await _run_shell("settings get system screen_off_timeout")
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            return val == int(expected) if isinstance(expected, int) else False
+
+        # 8) 勿扰模式 (DND / zen_mode)
+        if q == "dnd_enabled":
+            out = await _run_shell("settings get global zen_mode")
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            is_enabled = val > 0
+            return is_enabled == bool(expected)
+
+        # 9) 蓝牙开关（对应 train_08_enable_bluetooth）
+        if q == "bluetooth_enabled":
+            out = await _run_shell(
+                "settings get global bluetooth_on || "
+                "settings get secure bluetooth_on"
+            )
+            try:
+                val = int(out.strip())
+            except ValueError:
+                return False
+            return bool(val) == bool(expected)
+
+        logger.warning(f"No shell-based validator implemented for query '{q}' (task {task.id})")
         return False
 
+    except Exception as e:
+        logger.error(f"Validation failed for task {task.id}: {e}", exc_info=True)
+        return False
 
 def calculate_grpo_advantages(
     rewards: List[float],

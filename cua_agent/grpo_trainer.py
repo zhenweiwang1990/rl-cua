@@ -183,7 +183,7 @@ class CUAGRPOTrainer:
         self.eval_reward_tracker = RewardTracker()
         
         # Wandb
-        self.use_wandb = config.enable_wandb and WANDB_AVAILABLE
+        self.use_wandb = False
         
         # Pad token
         self.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
