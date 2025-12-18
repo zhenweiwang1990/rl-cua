@@ -174,8 +174,8 @@ DOCKER_CMD="docker run -d \
     $NCCL_ENV_VARS \
     $VLLM_IMAGE"
 
-# Build vLLM command
-VLLM_CMD="--model $MODEL_NAME \
+# Build vLLM command arguments (without launcher)
+VLLM_ARGS="--model $MODEL_NAME \
     --host $HOST \
     --port $PORT \
     --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
@@ -186,12 +186,21 @@ VLLM_CMD="--model $MODEL_NAME \
 
 # Add trust remote code
 if [ "$TRUST_REMOTE_CODE" = "true" ]; then
-    VLLM_CMD="$VLLM_CMD --trust-remote-code"
+    VLLM_ARGS="$VLLM_ARGS --trust-remote-code"
 fi
 
 # Add LoRA support if path provided
 if [ -n "$LORA_PATH" ]; then
-    VLLM_CMD="$VLLM_CMD --enable-lora --lora-modules $LORA_NAME=/workspace/lora_adapter"
+    VLLM_ARGS="$VLLM_ARGS --enable-lora --lora-modules $LORA_NAME=/workspace/lora_adapter"
+fi
+
+# Build final command depending on image
+# - For vllm/vllm-openai: entrypoint is already the OpenAI server, so we just pass args.
+# - For nvcr.io/nvidia/vllm:*: we must explicitly run the server via python.
+if [[ "$VLLM_IMAGE" == nvcr.io/nvidia/vllm:* ]]; then
+    VLLM_CMD="python -m vllm.entrypoints.openai.api_server $VLLM_ARGS"
+else
+    VLLM_CMD="$VLLM_ARGS"
 fi
 
 echo "Starting vLLM server for GRPO training..."
