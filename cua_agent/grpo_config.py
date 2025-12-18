@@ -95,7 +95,7 @@ class VLLMConfig:
         return cls(
             api_base=os.environ.get("VLLM_API_BASE", "http://localhost:8000/v1"),
             api_key=os.environ.get("VLLM_API_KEY"),
-            base_model=os.environ.get("BASE_MODEL", "unsloth/Qwen3-VL-32B-Instruct"),
+            base_model=os.environ.get("MODEL_NAME", "unsloth/Qwen3-VL-32B-Instruct"),
             lora_name=os.environ.get("LORA_NAME", "cua_agent_lora"),
             lora_path=os.environ.get("LORA_PATH"),
             max_tokens=get_env_int("MAX_TOKENS", "2048"),

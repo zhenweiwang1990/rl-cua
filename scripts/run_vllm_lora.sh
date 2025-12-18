@@ -8,7 +8,8 @@ echo ""
 
 # Default values - Using Qwen3-VL for CUA
 MODEL_PATH="${MODEL_PATH:-outputs/grpo/best_model}"
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-32B-Instruct}"
+# NOTE: This script now only respects MODEL_NAME for selecting the base model.
+MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 LORA_NAME="${LORA_NAME:-cua_agent_lora}"
@@ -27,7 +28,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo ""
     echo "Environment variables:"
     echo "  MODEL_PATH          - Path to LoRA adapter directory (default: outputs/grpo/best_model)"
-    echo "  BASE_MODEL          - Base model name or path (default: unsloth/Qwen3-VL-32B-Instruct)"
+    echo "  MODEL_NAME          - Base model name or path (default: unsloth/Qwen3-VL-32B-Instruct)"
     echo "  PORT                - API server port (default: 8000)"
     echo "  HOST                - API server host (default: 0.0.0.0)"
     echo "  LORA_NAME           - LoRA adapter name (default: cua_agent_lora)"
@@ -103,7 +104,7 @@ HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
 
 echo "Configuration:"
-echo "  - Base model: $BASE_MODEL"
+echo "  - Base model: $MODEL_NAME"
 echo "  - Model hub: $MODEL_HUB"
 echo "  - LoRA adapter: $MODEL_ABS_PATH"
 echo "  - LoRA name: $LORA_NAME"
@@ -158,7 +159,7 @@ fi
 # Prepare vLLM command
 # Note: For VLM models with LoRA
 # First upgrade transformers to support Qwen3-VL, then start vLLM
-VLLM_BASE_CMD="vllm serve $BASE_MODEL --enable-lora --lora-modules $LORA_NAME=/workspace/lora_adapter --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --enable-auto-tool-choice --tool-call-parser hermes"
+VLLM_BASE_CMD="vllm serve $MODEL_NAME --enable-lora --lora-modules $LORA_NAME=/workspace/lora_adapter --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --enable-auto-tool-choice --tool-call-parser hermes"
 
 # Add trust-remote-code flag if enabled
 if [ "$TRUST_REMOTE_CODE" = "true" ]; then
@@ -196,7 +197,7 @@ echo "  - Chat completions: http://$HOST:$PORT/v1/chat/completions"
 echo "  - Completions: http://$HOST:$PORT/v1/completions"
 echo ""
 echo "Available models:"
-echo "  - Base model (no LoRA): \"$BASE_MODEL\""
+echo "  - Base model (no LoRA): \"$MODEL_NAME\""
 echo "  - LoRA model: \"$LORA_NAME\""
 echo ""
 echo "Useful commands:"

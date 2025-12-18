@@ -7,7 +7,9 @@ echo "=========================================="
 echo ""
 
 # Default values - Using Qwen3-VL for CUA
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-30B-A3B-Instruct}"
+# NOTE: This script now only respects MODEL_NAME for selecting the base model.
+#       The previous BASE_MODEL env var is ignored for simplicity.
+MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-30B-A3B-Instruct}"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 GPU_DEVICES="${GPU_DEVICES:-all}"
@@ -161,7 +163,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "Usage: ./scripts/run_vllm_base.sh"
     echo ""
     echo "Environment variables:"
-    echo "  BASE_MODEL          - Base model name or path (default: unsloth/Qwen3-VL-8B-Instruct)"
+    echo "  MODEL_NAME          - Base model name or path (default: unsloth/Qwen3-VL-30B-A3B-Instruct)"
     echo "  PORT                - API server port (default: 8000)"
     echo "  HOST                - API server host (default: 0.0.0.0)"
     echo "  GPU_DEVICES         - GPU devices to use: 'all', '0-7', '0,1,2,3', or single index (default: all)"
@@ -175,7 +177,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "  HF_ENDPOINT         - Hugging Face endpoint (default: https://hf-mirror.com for China)"
     echo "  MODELSCOPE_CACHE    - ModelScope cache directory (default: ~/.cache/modelscope)"
     echo ""
-    echo "Examples:"
+    echo "Examples (MODEL_NAME only, BASE_MODEL is no longer used):"
     echo "  # Run with default settings (auto-detect all GPUs)"
     echo "  ./scripts/run_vllm_base.sh"
     echo ""
@@ -189,10 +191,10 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "  PORT=8080 GPU_DEVICES=0-7 TENSOR_PARALLEL_SIZE=8 ./scripts/run_vllm_base.sh"
     echo ""
     echo "  # Run with different VLM model on 8 GPUs"
-    echo "  BASE_MODEL=unsloth/Qwen3-VL-30B-A3B-Instruct GPU_DEVICES=0-7 TENSOR_PARALLEL_SIZE=8 ./scripts/run_vllm_base.sh"
+    echo "  MODEL_NAME=unsloth/Qwen3-VL-30B-A3B-Instruct GPU_DEVICES=0-7 TENSOR_PARALLEL_SIZE=8 ./scripts/run_vllm_base.sh"
     echo ""
     echo "  # Use ModelScope (for China users) with 8 GPUs"
-    echo "  MODEL_HUB=modelscope BASE_MODEL=unsloth/Qwen3-VL-30B-A3B-Instruct GPU_DEVICES=0-7 TENSOR_PARALLEL_SIZE=8 ./scripts/run_vllm_base.sh"
+    echo "  MODEL_HUB=modelscope MODEL_NAME=unsloth/Qwen3-VL-30B-A3B-Instruct GPU_DEVICES=0-7 TENSOR_PARALLEL_SIZE=8 ./scripts/run_vllm_base.sh"
     echo ""
     exit 0
 fi
@@ -284,7 +286,7 @@ MODEL_HUB="${MODEL_HUB:-huggingface}"
 MODELSCOPE_CACHE="${MODELSCOPE_CACHE:-$HOME/.cache/modelscope}"
 
 echo "Configuration:"
-echo "  - Base model: $BASE_MODEL"
+echo "  - Base model: $MODEL_NAME"
 echo "  - Docker image: $VLLM_IMAGE"
 echo "  - Model hub: $MODEL_HUB"
 echo "  - Container name: $CONTAINER_NAME"
@@ -370,15 +372,15 @@ fi
 # For vllm/vllm-openai image, the entrypoint is already set, so we just pass arguments
 # For GH200 image, we may need to set entrypoint explicitly
 if [ "$MODEL_HUB" = "modelscope" ]; then
-    # Extract model org and name from BASE_MODEL (e.g., "unsloth/Qwen3-VL-30B-A3B-Instruct")
-    MODEL_ORG=$(echo "$BASE_MODEL" | cut -d'/' -f1)
-    MODEL_NAME=$(echo "$BASE_MODEL" | cut -d'/' -f2)
+    # Extract model org and name from MODEL_NAME (e.g., "unsloth/Qwen3-VL-30B-A3B-Instruct")
+    MODEL_ORG=$(echo "$MODEL_NAME" | cut -d'/' -f1)
+    MODEL_SHORT_NAME=$(echo "$MODEL_NAME" | cut -d'/' -f2)
     # Use local ModelScope cache path
-    MODEL_PATH="/root/.cache/modelscope/hub/models/$MODEL_ORG/$MODEL_NAME"
+    MODEL_PATH="/root/.cache/modelscope/hub/models/$MODEL_ORG/$MODEL_SHORT_NAME"
     echo "Using ModelScope local path: $MODEL_PATH"
     VLLM_BASE_CMD="--model $MODEL_PATH --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization=$GPU_MEMORY_UTILIZATION"
 else
-    VLLM_BASE_CMD="--model $BASE_MODEL --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization=$GPU_MEMORY_UTILIZATION"
+    VLLM_BASE_CMD="--model $MODEL_NAME --host $HOST --port $PORT --tensor-parallel-size $TENSOR_PARALLEL_SIZE --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization=$GPU_MEMORY_UTILIZATION"
 fi
 
 # Add trust-remote-code flag if enabled
@@ -395,7 +397,7 @@ VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser qwen3_coder"
 
 # Build the command string
 # Check if model requires newer transformers (Qwen3-VL)
-if [[ "$BASE_MODEL" == *"Qwen3-VL"* ]] || [[ "$BASE_MODEL" == *"Qwen2.5-VL"* ]]; then
+if [[ "$MODEL_NAME" == *"Qwen3-VL"* ]] || [[ "$MODEL_NAME" == *"Qwen2.5-VL"* ]]; then
     NEEDS_NEW_TRANSFORMERS=true
 else
     NEEDS_NEW_TRANSFORMERS=false
@@ -443,7 +445,7 @@ echo "OpenAI-compatible endpoints:"
 echo "  - Chat completions: http://$HOST:$PORT/v1/chat/completions"
 echo "  - Completions: http://$HOST:$PORT/v1/completions"
 echo ""
-echo "Model: $BASE_MODEL"
+echo "Model: $MODEL_NAME"
 echo "Multi-GPU: $NUM_GPUS_TO_USE GPU(s) (Tensor Parallel: $TENSOR_PARALLEL_SIZE)"
 echo ""
 echo "Useful commands:"
@@ -455,7 +457,7 @@ echo ""
 echo "Example curl command (with image):"
 echo '  curl http://localhost:'$PORT'/v1/chat/completions \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -d '"'"'{"model": "'$BASE_MODEL'", "messages": [{"role": "user", "content": [{"type": "text", "text": "What is in this image?"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}], "max_tokens": 1000}'"'"
+echo '    -d '"'"'{"model": "'$MODEL_NAME'", "messages": [{"role": "user", "content": [{"type": "text", "text": "What is in this image?"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}], "max_tokens": 1000}'"'"
 echo ""
 
 # Follow logs

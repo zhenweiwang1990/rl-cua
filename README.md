@@ -257,10 +257,10 @@ For better performance with multiple agents or larger models, use the provided s
 PORT=8080 ./scripts/run_vllm_base.sh
 
 # With different model
-BASE_MODEL=Qwen/Qwen2-VL-7B-Instruct ./scripts/run_vllm_base.sh
+MODEL_NAME=Qwen/Qwen2-VL-7B-Instruct ./scripts/run_vllm_base.sh
 
 # Use ModelScope (for users in China)
-MODEL_HUB=modelscope BASE_MODEL=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
+MODEL_HUB=modelscope MODEL_NAME=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
 ```
 
 ### Start vLLM Server (with LoRA)
@@ -304,7 +304,7 @@ All scripts support loading models from ModelScope:
 export MODEL_HUB=modelscope
 
 # Start with ModelScope
-MODEL_HUB=modelscope BASE_MODEL=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
+MODEL_HUB=modelscope MODEL_NAME=Qwen/Qwen2.5-VL-32B-Instruct ./scripts/run_vllm_base.sh
 
 # Or with LoRA
 MODEL_HUB=modelscope ./scripts/run_vllm_lora.sh

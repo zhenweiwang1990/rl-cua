@@ -55,7 +55,7 @@ TRAIN_GPU_DEVICES=0 ./docker_train_grpo.sh
 
 3. **使用更小的模型**（如果可用）：
    ```bash
-   BASE_MODEL=unsloth/Qwen3-VL-8B-Instruct  # 8B 模型
+   MODEL_NAME=unsloth/Qwen3-VL-8B-Instruct  # 8B 模型
    ```
 
 ### 训练端优化

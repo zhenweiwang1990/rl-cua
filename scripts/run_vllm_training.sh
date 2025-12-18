@@ -10,7 +10,8 @@ echo "with dynamic LoRA adapter support."
 echo ""
 
 # Default values - Using Qwen3-VL for CUA
-BASE_MODEL="${BASE_MODEL:-unsloth/Qwen3-VL-32B-Instruct}"
+# NOTE: This script now only respects MODEL_NAME for selecting the base model.
+MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3-VL-32B-Instruct}"
 LORA_PATH="${LORA_PATH:-}"  # Optional: Initial LoRA adapter path
 LORA_NAME="${LORA_NAME:-cua_agent_lora}"
 PORT="${PORT:-8000}"
@@ -29,7 +30,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     echo "Usage: ./scripts/run_vllm_training.sh"
     echo ""
     echo "Environment variables:"
-    echo "  BASE_MODEL          - Base model name (default: unsloth/Qwen3-VL-32B-Instruct)"
+    echo "  MODEL_NAME          - Base model name (default: unsloth/Qwen3-VL-32B-Instruct)"
     echo "  LORA_PATH           - Path to initial LoRA adapter (optional)"
     echo "  LORA_NAME           - LoRA adapter name for API (default: cua_agent_lora)"
     echo "  PORT                - API server port (default: 8000)"
@@ -92,7 +93,7 @@ fi
 CUDA_VISIBLE_DEVICES="$GPU_LIST"
 
 echo "Configuration:"
-echo "  - Base model: $BASE_MODEL"
+echo "  - Base model: $MODEL_NAME"
 echo "  - LoRA name: $LORA_NAME"
 if [ -n "$LORA_PATH" ]; then
     echo "  - Initial LoRA path: $LORA_PATH"
@@ -163,7 +164,7 @@ DOCKER_CMD="docker run -d \
     $VLLM_IMAGE"
 
 # Build vLLM command
-VLLM_CMD="--model $BASE_MODEL \
+VLLM_CMD="--model $MODEL_NAME \
     --host $HOST \
     --port $PORT \
     --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
@@ -195,7 +196,7 @@ echo ""
 echo "API available at: http://$HOST:$PORT/v1"
 echo ""
 echo "Available models:"
-echo "  - Base model: $BASE_MODEL"
+echo "  - Base model: $MODEL_NAME"
 if [ -n "$LORA_PATH" ]; then
     echo "  - LoRA model: $LORA_NAME"
 fi
