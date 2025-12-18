@@ -114,6 +114,12 @@ if [ "$TRAIN_GPU_DEVICES" = "all" ] || [[ "$TRAIN_GPU_DEVICES" =~ ^[0-9]+$ ]]; t
 fi
 echo ""
 
+# Prepare optional CUDA env args for docker (only set if non-empty to avoid hiding GPUs)
+CUDA_ENV_ARGS=()
+if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+  CUDA_ENV_ARGS+=(-e CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES")
+fi
+
 # Build image if needed
 if ! docker images | grep -q "${IMAGE_NAME%%:*}"; then
   echo "Docker image '${IMAGE_NAME}' not found, building..."
@@ -150,7 +156,7 @@ docker run -d \
   -e BOX_TYPE="${BOX_TYPE:-android}" \
   -e MAX_TURNS="${MAX_TURNS:-20}" \
   -e OUTPUT_DIR="${OUTPUT_DIR:-outputs/grpo_cua}" \
-  -e CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}" \
+  "${CUDA_ENV_ARGS[@]}" \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   "$IMAGE_NAME" \
   bash -lc "cd /workspace && python init_lora_adapter.py && python train_grpo_cua.py ${MODE_ARGS[*]}"
