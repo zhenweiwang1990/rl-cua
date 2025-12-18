@@ -182,7 +182,7 @@ VLLM_CMD="--model $MODEL_NAME \
     --max-model-len $MAX_MODEL_LEN \
     --gpu-memory-utilization=$GPU_MEMORY_UTILIZATION \
     --enable-auto-tool-choice \
-    --tool-call-parser qwen3_coder"
+    --tool-call-parser hermes"
 
 # Add trust remote code
 if [ "$TRUST_REMOTE_CODE" = "true" ]; then
