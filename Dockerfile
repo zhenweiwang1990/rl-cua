@@ -32,6 +32,10 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# ========== Vision deps for Unsloth / torchvision ==========
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torchvision
+
 # ========== Unsloth (for GRPO LoRA training) ==========
 # Note: Unsloth is installed from GitHub. Requires a GPU-enabled environment.
 RUN --mount=type=cache,target=/root/.cache/pip \
