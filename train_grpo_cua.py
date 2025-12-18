@@ -143,13 +143,18 @@ def find_latest_checkpoint(output_dir: str) -> Path:
 
 
 def find_best_checkpoint(output_dir: str):
-    """Find the best checkpoint based on accuracy."""
+    """Find the best checkpoint based on accuracy.
+    
+    Returns:
+        Tuple of (checkpoint_path, accuracy), or None if no checkpoints found.
+    """
     output_path = Path(output_dir) / "checkpoints"
     if not output_path.exists():
         return None
     
     best_checkpoint = None
     best_accuracy = -1.0
+    found_valid_accuracy = False
     
     for path in output_path.iterdir():
         if path.is_dir() and path.name.startswith("checkpoint-"):
@@ -158,14 +163,85 @@ def find_best_checkpoint(output_dir: str):
                 try:
                     with open(metadata_file, 'r') as f:
                         metadata = json.load(f)
-                    accuracy = metadata.get("accuracy", 0.0)
+                    # Prefer top-level accuracy if present
+                    if "accuracy" in metadata:
+                        accuracy = metadata["accuracy"]
+                        found_valid_accuracy = True
+                    # Fall back to nested metrics.accuracy (for compatibility)
+                    elif "metrics" in metadata and "accuracy" in metadata["metrics"]:
+                        accuracy = metadata["metrics"]["accuracy"]
+                        found_valid_accuracy = True
+                    else:
+                        continue
                     if accuracy > best_accuracy:
                         best_accuracy = accuracy
                         best_checkpoint = path
                 except (json.JSONDecodeError, KeyError):
                     continue
     
+    # If no valid accuracy found, but checkpoints exist, fall back to latest
+    if not found_valid_accuracy:
+        latest = find_latest_checkpoint(output_dir)
+        if latest is not None:
+            return latest, 0.0
+        return None
+    
     return (best_checkpoint, best_accuracy) if best_checkpoint else None
+
+
+def find_checkpoint_with_best_marker(output_dir: str):
+    """Find checkpoint that has best_model_path marker in training_state.json.
+    
+    This mirrors rl-unsloth's behavior: we look for checkpoints whose
+    training_state.json contains a non-empty best_model_path, meaning
+    they were marked as best during training.
+    
+    Returns:
+        Path to checkpoint with best marker, or None if no such checkpoint.
+    """
+    output_path = Path(output_dir) / "checkpoints"
+    if not output_path.exists():
+        return None
+    
+    marked = []
+    for path in output_path.iterdir():
+        if path.is_dir() and path.name.startswith("checkpoint-"):
+            state_file = path / "training_state.json"
+            if not state_file.exists():
+                continue
+            try:
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+                best_model_path = state.get("best_model_path")
+                if best_model_path and best_model_path != "None":
+                    # Use step from directory name for sorting
+                    try:
+                        step = int(path.name.split("-")[1])
+                    except (IndexError, ValueError):
+                        step = 0
+                    marked.append((step, path))
+            except (json.JSONDecodeError, KeyError):
+                continue
+    
+    if not marked:
+        return None
+    
+    marked.sort(key=lambda x: x[0])
+    return marked[-1][1]
+
+
+def find_auto_resume_checkpoint(output_dir: str):
+    """Automatically choose checkpoint to resume from.
+    
+    Priority:
+      1. Checkpoint with best_model_path marker (if any)
+      2. Latest checkpoint (if any)
+      3. None (start from scratch)
+    """
+    best_marked = find_checkpoint_with_best_marker(output_dir)
+    if best_marked is not None:
+        return best_marked
+    return find_latest_checkpoint(output_dir)
 
 
 def main():
@@ -239,10 +315,25 @@ def main():
         if resume_from_checkpoint:
             print(f"\n📂 Resuming from latest checkpoint: {resume_from_checkpoint}", flush=True)
     else:
-        # Auto-resume: check for existing checkpoints
-        resume_from_checkpoint = find_latest_checkpoint(config.output_dir)
+        # Auto-resume: prefer checkpoint with best marker, otherwise latest
+        resume_from_checkpoint = find_auto_resume_checkpoint(config.output_dir)
         if resume_from_checkpoint:
-            print(f"\n📂 Auto-resuming from checkpoint: {resume_from_checkpoint}", flush=True)
+            # Check whether this checkpoint has a best marker (training_state.best_model_path)
+            state_file = Path(resume_from_checkpoint) / "training_state.json"
+            has_best_marker = False
+            if state_file.exists():
+                try:
+                    with open(state_file, "r") as f:
+                        state = json.load(f)
+                    best_model_path = state.get("best_model_path")
+                    if best_model_path and best_model_path != "None":
+                        has_best_marker = True
+                except (json.JSONDecodeError, KeyError):
+                    has_best_marker = False
+            if has_best_marker:
+                print(f"\n📂 Auto-resuming from checkpoint with best marker: {resume_from_checkpoint}", flush=True)
+            else:
+                print(f"\n📂 Auto-resuming from latest checkpoint: {resume_from_checkpoint}", flush=True)
         else:
             print("\n📝 No checkpoints found, starting from scratch", flush=True)
     

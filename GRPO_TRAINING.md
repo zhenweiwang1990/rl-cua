@@ -296,7 +296,7 @@ outputs/grpo_cua/
 ### Resume Training
 
 ```bash
-# Auto-resume from latest checkpoint
+# Auto-resume from best-marked checkpoint (if any) or latest checkpoint
 python train_grpo_cua.py
 
 # Resume from specific checkpoint
@@ -305,6 +305,21 @@ python train_grpo_cua.py --resume_from_checkpoint outputs/grpo_cua/checkpoints/c
 # Resume from best checkpoint
 python train_grpo_cua.py --resume_best
 ```
+
+Behind the scenes, the training script now uses an **auto-resume strategy similar to `rl-unsloth`**:
+
+- If you run `python train_grpo_cua.py` **without** any resume flags:
+  - It first looks for a checkpoint whose `training_state.json` contains a non-empty `best_model_path`
+    (i.e., a checkpoint that was marked as best during training), and resumes from the **latest such checkpoint**.
+  - If no checkpoint has a best marker, it falls back to the **latest checkpoint** in `checkpoints/`.
+  - If no checkpoints exist, it clearly prints that it is **starting from scratch**.
+
+When resuming, the console output will explicitly indicate whether it is:
+
+- Resuming from a **specified** checkpoint
+- Resuming from the **best** checkpoint (by accuracy)
+- Auto-resuming from a checkpoint **with a best marker**
+- Auto-resuming from the **latest** checkpoint
 
 ## Monitoring
 

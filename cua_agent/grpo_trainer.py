@@ -201,6 +201,9 @@ class CUAGRPOTrainer:
         
         # Pad token
         self.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+
+        # CLI color support (ANSI). Disabled when NO_COLOR is set.
+        self._enable_color = os.environ.get("NO_COLOR", "").strip() == ""
         
         # Resume from checkpoint if provided
         if resume_from_checkpoint:
@@ -208,6 +211,40 @@ class CUAGRPOTrainer:
         
         # Log configuration
         self._log_config()
+    
+    def _color(self, text: str, color: str) -> str:
+        """Apply simple ANSI colors for CLI readability.
+
+        Uses basic colors only (no extra dependencies), and can be disabled
+        via the standard NO_COLOR environment variable.
+        """
+        if not self._enable_color:
+            return text
+        colors = {
+            "green": "\033[92m",
+            "yellow": "\033[93m",
+            "red": "\033[91m",
+            "cyan": "\033[96m",
+            "magenta": "\033[95m",
+            "blue": "\033[94m",
+            "bold": "\033[1m",
+        }
+        reset = "\033[0m"
+        prefix = colors.get(color)
+        if not prefix:
+            return text
+        return f"{prefix}{text}{reset}"
+    
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Format seconds into H:MM:SS for progress display."""
+        seconds = max(0.0, float(seconds))
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        if h > 0:
+            return f"{h:d}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
     
     def _log_config(self):
         """Log training configuration."""
@@ -224,6 +261,9 @@ class CUAGRPOTrainer:
         logger.info(f"Max steps: {self.config.max_steps}")
         logger.info(f"Target accuracy: {self.config.target_accuracy * 100:.1f}%")
         logger.info(f"Output dir: {self.output_dir}")
+        logger.info(f"Verbose: {self.config.verbose}")
+        logger.info(f"Detailed rollout logging: {self.config.enable_detailed_logging}")
+        logger.info(f"Wandb enabled: {self.use_wandb}")
         logger.info("=" * 60)
 
     def _reload_vllm_lora_adapter(self, adapter_path: Path) -> None:
@@ -748,7 +788,7 @@ class CUAGRPOTrainer:
         
         self.model.train()
         
-        return TrainingMetrics(
+        metrics = TrainingMetrics(
             loss=0.0,
             policy_loss=0.0,
             kl_loss=0.0,
@@ -758,6 +798,15 @@ class CUAGRPOTrainer:
             accuracy=accuracy,
             reward_std=np.std(rewards) if rewards else 0.0,
         )
+        
+        logger.info(
+            "Evaluation complete | accuracy=%.4f | reward=%.4f | std=%.4f",
+            metrics.accuracy,
+            metrics.avg_reward,
+            metrics.reward_std,
+        )
+        
+        return metrics
     
     async def _update_vllm_lora(self):
         """Placeholder for dynamic LoRA switching on vLLM server.
@@ -778,7 +827,7 @@ class CUAGRPOTrainer:
         """Main training loop."""
         logger.info("Starting training...")
         print("\n" + "=" * 80, flush=True)
-        print(f"🚀 Starting CUA GRPO Training", flush=True)
+        print(self._color("🚀 Starting CUA GRPO Training", "green"), flush=True)
         print("=" * 80, flush=True)
         
         self.training_start_time = time.time()
@@ -794,12 +843,21 @@ class CUAGRPOTrainer:
             )
 
         # Baseline evaluation before training (like rl-qwen3 flow)
-        print("\n📊 Running baseline evaluation before training...", flush=True)
+        print(self._color("\n📊 Running baseline evaluation before training...", "cyan"), flush=True)
         baseline_metrics = self._run_evaluation()
         print(
-            f"   Baseline accuracy = {baseline_metrics.accuracy:.2%}, "
-            f"avg_reward = {baseline_metrics.avg_reward:.3f}",
+            self._color(
+                f"   Baseline accuracy = {baseline_metrics.accuracy:.2%}, "
+                f"avg_reward = {baseline_metrics.avg_reward:.3f}",
+                "cyan",
+            ),
             flush=True,
+        )
+        logger.info(
+            "Baseline evaluation | accuracy=%.4f | reward=%.4f | std=%.4f",
+            baseline_metrics.accuracy,
+            baseline_metrics.avg_reward,
+            baseline_metrics.reward_std,
         )
         if self.use_wandb:
             wandb.log(
@@ -816,14 +874,34 @@ class CUAGRPOTrainer:
         
         for step in range(self.global_step, self.config.max_steps):
             self.global_step = step + 1
+            # training_start_time is set once at the beginning
+            self.training_start_time = self.training_start_time or time.time()
             step_start = time.time()
 
-            print("\n" + "=" * 80, flush=True)
-            print(
-                f"STEP {self.global_step}/{self.config.max_steps}",
-                flush=True,
+            # Progress header with percentage, elapsed and ETA
+            steps_done = self.global_step
+            total_steps = max(self.config.max_steps, 1)
+            progress = steps_done / total_steps
+            elapsed = time.time() - self.training_start_time
+            eta = elapsed / max(steps_done, 1) * max(total_steps - steps_done, 0)
+            progress_line = (
+                f"STEP {self.global_step}/{self.config.max_steps} "
+                f"({progress * 100:5.1f}%) | "
+                f"elapsed {self._format_time(elapsed)} | "
+                f"ETA {self._format_time(eta)}"
             )
+
+            print("\n" + "=" * 80, flush=True)
+            print(self._color(progress_line, "magenta"), flush=True)
             print("=" * 80, flush=True)
+            logger.info(
+                "Step %d/%d | progress=%.3f | elapsed=%s | eta=%s",
+                self.global_step,
+                self.config.max_steps,
+                progress,
+                self._format_time(elapsed),
+                self._format_time(eta),
+            )
             
             # Get batch of tasks
             batch_tasks = []
@@ -834,15 +912,24 @@ class CUAGRPOTrainer:
             # Collect rollouts
             rollout_start = time.time()
             print(
-                f"🎯 COLLECTING ROLLOUTS "
-                f"({len(batch_tasks)} tasks × {self.config.rollout.num_rollouts} rollouts)...",
+                self._color(
+                    f"🎯 COLLECTING ROLLOUTS "
+                    f"({len(batch_tasks)} tasks × {self.config.rollout.num_rollouts} rollouts)...",
+                    "cyan",
+                ),
                 flush=True,
             )
             groups = loop.run_until_complete(self._collect_rollouts(batch_tasks))
             rollout_time = time.time() - rollout_start
+            logger.info(
+                "Rollouts collected | tasks=%d | rollouts_per_task=%d | time=%.2fs",
+                len(batch_tasks),
+                self.config.rollout.num_rollouts,
+                rollout_time,
+            )
             
             # Compute advantages
-            print("📐 Computing GRPO advantages for trajectory groups...", flush=True)
+            print(self._color("📐 Computing GRPO advantages for trajectory groups...", "cyan"), flush=True)
             groups, groups_kept, groups_filtered = self._compute_advantages(groups)
             
             # Training step
@@ -900,15 +987,35 @@ class CUAGRPOTrainer:
             )
             
             # Log progress
-            print(
+            summary_line = (
                 f"✅ Step {self.global_step}/{self.config.max_steps} | "
                 f"Loss={metrics.loss:.4f} | "
                 f"Accuracy={metrics.accuracy:.2%} | "
                 f"Reward={metrics.avg_reward:.3f} | "
                 f"Rollout={rollout_time:.1f}s | "
                 f"Train={train_time:.1f}s | "
-                f"Groups kept={groups_kept} / {groups_kept + groups_filtered}",
-                flush=True
+                f"Groups kept={groups_kept} / {groups_kept + groups_filtered}"
+            )
+            # Color-code summary line by accuracy to make training progress clearer
+            color = "green"
+            if metrics.accuracy < 0.2:
+                color = "red"
+            elif metrics.accuracy < 0.5:
+                color = "yellow"
+            print(self._color(summary_line, color), flush=True)
+            logger.info(
+                "Step summary | step=%d | loss=%.6f | accuracy=%.4f | reward=%.4f | "
+                "reward_std=%.4f | rollout_time=%.2f | train_time=%.2f | "
+                "groups_kept=%d | groups_filtered=%d",
+                self.global_step,
+                metrics.loss,
+                metrics.accuracy,
+                metrics.avg_reward,
+                metrics.reward_std,
+                rollout_time,
+                train_time,
+                groups_kept,
+                groups_filtered,
             )
             
             # Log to wandb
@@ -934,10 +1041,20 @@ class CUAGRPOTrainer:
                 eval_metrics = self._run_evaluation()
                 
                 print(
-                    f"\n📊 Eval Step {self.global_step}: "
-                    f"Accuracy={eval_metrics.accuracy:.2%}, "
-                    f"Reward={eval_metrics.avg_reward:.3f}\n",
+                    self._color(
+                        f"\n📊 Eval Step {self.global_step}: "
+                        f"Accuracy={eval_metrics.accuracy:.2%}, "
+                        f"Reward={eval_metrics.avg_reward:.3f}\n",
+                        "blue",
+                    ),
                     flush=True
+                )
+                logger.info(
+                    "Eval step | step=%d | accuracy=%.4f | reward=%.4f | std=%.4f",
+                    self.global_step,
+                    eval_metrics.accuracy,
+                    eval_metrics.avg_reward,
+                    eval_metrics.reward_std,
                 )
                 
                 if self.use_wandb:
@@ -952,7 +1069,18 @@ class CUAGRPOTrainer:
                 if is_best:
                     self.best_accuracy = eval_metrics.accuracy
                     self.evals_without_improvement = 0
-                    print(f"🎯 New best accuracy: {self.best_accuracy:.2%}", flush=True)
+                    print(
+                        self._color(
+                            f"🎯 New best accuracy: {self.best_accuracy:.2%}",
+                            "green",
+                        ),
+                        flush=True,
+                    )
+                    logger.info(
+                        "New best accuracy | step=%d | accuracy=%.4f",
+                        self.global_step,
+                        self.best_accuracy,
+                    )
                 else:
                     self.evals_without_improvement += 1
                 
@@ -961,13 +1089,36 @@ class CUAGRPOTrainer:
                 
                 # Early stopping
                 if self.evals_without_improvement >= self.config.patience:
-                    print(f"Early stopping: no improvement for {self.config.patience} evaluations", flush=True)
+                    print(
+                        self._color(
+                            f"Early stopping: no improvement for {self.config.patience} evaluations",
+                            "yellow",
+                        ),
+                        flush=True,
+                    )
+                    logger.info(
+                        "Early stopping triggered | patience=%d | step=%d",
+                        self.config.patience,
+                        self.global_step,
+                    )
                     break
                 
                 # Target reached
                 if eval_metrics.accuracy >= self.config.target_accuracy:
-                    print(f"🎉 Target accuracy {self.config.target_accuracy:.2%} reached!", flush=True)
+                    print(
+                        self._color(
+                            f"🎉 Target accuracy {self.config.target_accuracy:.2%} reached!",
+                            "green",
+                        ),
+                        flush=True,
+                    )
                     self._save_checkpoint(eval_metrics, is_best=True)
+                    logger.info(
+                        "Target accuracy reached | target=%.4f | accuracy=%.4f | step=%d",
+                        self.config.target_accuracy,
+                        eval_metrics.accuracy,
+                        self.global_step,
+                    )
                     break
             
             # Save checkpoint periodically
@@ -982,7 +1133,7 @@ class CUAGRPOTrainer:
         total_time = time.time() - self.training_start_time
         
         print("\n" + "=" * 60, flush=True)
-        print("✅ Training complete!", flush=True)
+        print(self._color("✅ Training complete!", "green"), flush=True)
         print("=" * 60, flush=True)
         print(f"Total time: {total_time / 60:.1f} minutes", flush=True)
         print(f"Best accuracy: {self.best_accuracy:.2%}", flush=True)
@@ -990,6 +1141,14 @@ class CUAGRPOTrainer:
         if self.best_model_path:
             print(f"Best model: {self.best_model_path}", flush=True)
         print("=" * 60, flush=True)
+        logger.info(
+            "Training complete | total_time_min=%.2f | best_accuracy=%.4f | "
+            "final_model=%s | best_model=%s",
+            total_time / 60.0,
+            self.best_accuracy,
+            final_dir,
+            self.best_model_path,
+        )
         
         if self.use_wandb:
             wandb.finish()
