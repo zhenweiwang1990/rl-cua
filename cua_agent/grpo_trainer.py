@@ -404,7 +404,7 @@ class CUAGRPOTrainer:
                     )
                     group.samples.append(sample)
                 except Exception as e:
-                    logger.error(f"Rollout failed for task {task.id}: {e}")
+                    logger.error(f"Rollout failed for task {task.id}: {e}", exc_info=True)
                     continue
 
             if group.samples:
