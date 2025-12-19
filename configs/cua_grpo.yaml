@@ -1,8 +1,9 @@
 # configs/cua_grpo.yaml
 # CUA Agent GRPO 训练配置
 
-# 注意：launcher 配置通过命令行参数指定（python -m areal.launcher.local）
-# 不需要在配置文件中指定 launcher 部分
+# ============ Launcher 配置 ============
+launcher:
+  type: "local"  # 使用本地 launcher (areal.launcher.local)
 
 # ============ 模型配置 ============
 model:

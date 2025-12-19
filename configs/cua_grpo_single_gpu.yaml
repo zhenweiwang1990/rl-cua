@@ -2,9 +2,8 @@
 # CUA Agent GRPO 训练配置 - 单 GPU (H200) 优化版
 
 # ============ Launcher 配置 ============
-# 注意：使用 areal.launcher.local 时，launcher 配置通过命令行参数指定
-# 如果需要在配置文件中指定，字段名可能不是 "type"，需要查看 AReaL 文档
-# 暂时注释掉，让 AReaL 使用默认值
+launcher:
+  type: "local"  # 使用本地 launcher (areal.launcher.local)
 
 # ============ 模型配置 ============
 model:
