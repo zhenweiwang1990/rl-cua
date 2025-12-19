@@ -20,6 +20,135 @@ import warnings
 from copy import deepcopy
 
 import torch.distributed as dist
+from datasets import Dataset
+
+# ============ Patch AReaL dataset module to support CUA dataset ============
+# This must be done before importing get_custom_dataset
+import areal.dataset as areal_dataset_module
+
+# Store the original function
+_original_get_custom_dataset = areal_dataset_module._get_custom_dataset
+
+def _get_cua_rl_dataset(
+    path: str,
+    split: str,
+    tokenizer,
+    max_length: int | None = None,
+    **kwargs,
+):
+    """Load CUA dataset for RL training.
+    
+    Supports paths like:
+    - cua_agent.tasks:get_areal_train_dataset
+    - cua_agent.tasks:get_areal_eval_dataset
+    """
+    # Parse the function path
+    if ":" in path:
+        module_path, func_name = path.split(":", 1)
+    else:
+        # Fallback: try to import from cua_agent.tasks
+        module_path = "cua_agent.tasks"
+        func_name = "get_areal_train_dataset" if split == "train" else "get_areal_eval_dataset"
+    
+    # Import the function dynamically
+    import importlib
+    module = importlib.import_module(module_path)
+    get_dataset_func = getattr(module, func_name)
+    
+    # Get the raw dataset (list of dicts)
+    raw_data = get_dataset_func()
+    
+    # Convert to HuggingFace Dataset format
+    # AReaL expects format: {"messages": [{"role": "user", "content": "..."}]}
+    def process_item(item):
+        # Extract prompt from the item
+        prompt = item.get("prompt", "")
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        else:
+            # If prompt is already in messages format, use it
+            messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
+        
+        # Store task info for reward function
+        # AReaL will pass this through kwargs to the reward function
+        task = item.get("task")
+        task_dict = task.to_dict() if hasattr(task, "to_dict") else (task if task else {})
+        metadata = item.get("metadata", {})
+        
+        # Create the dataset item
+        # Note: AReaL RL datasets typically have "messages" and optionally "answer" or task info
+        result = {
+            "messages": messages,
+        }
+        
+        # Store task information that can be accessed by the reward function
+        # We'll store it in a way that can be passed through the workflow
+        if task_dict:
+            # Store task description as "answer" field (used by some AReaL workflows)
+            result["answer"] = task_dict.get("description", "")
+            # Also store full task info for reward function
+            result["task_id"] = item.get("id", "")
+            result["task_metadata"] = metadata
+        
+        return result
+    
+    processed_data = [process_item(item) for item in raw_data]
+    dataset = Dataset.from_list(processed_data)
+    
+    # Filter by max_length if provided
+    if max_length is not None and tokenizer is not None:
+        def filter_length(sample):
+            # Tokenize the user content to check length
+            messages = sample.get("messages", [])
+            if messages:
+                content = messages[0].get("content", "")
+                if content:
+                    tokens = tokenizer.encode(content, add_special_tokens=False)
+                    return len(tokens) <= max_length
+            return True
+        
+        dataset = dataset.filter(filter_length)
+    
+    return dataset
+
+
+def _patched_get_custom_dataset(
+    path: str,
+    type: str = "sft",
+    split: str | None = None,
+    max_length: int | None = None,
+    tokenizer=None,
+    processor=None,
+    **kwargs,
+):
+    """Patched version of _get_custom_dataset that supports CUA dataset."""
+    # Check if this is a CUA dataset
+    if ("cua" in path.lower() or "cua_agent" in path) and type == "rl":
+        return _get_cua_rl_dataset(
+            path=path,
+            split=split or "train",
+            tokenizer=tokenizer,
+            max_length=max_length,
+            **kwargs,
+        )
+    
+    # Otherwise, use the original function
+    return _original_get_custom_dataset(
+        path=path,
+        type=type,
+        split=split,
+        max_length=max_length,
+        tokenizer=tokenizer,
+        processor=processor,
+        **kwargs,
+    )
+
+# Apply the patch
+areal_dataset_module._get_custom_dataset = _patched_get_custom_dataset
+# Update VALID_DATASETS to include cua
+if "cua" not in areal_dataset_module.VALID_DATASETS:
+    areal_dataset_module.VALID_DATASETS.append("cua")
+# ============ End of patch ============
 
 # AReaL imports - 使用官方 API
 from areal.api.alloc_mode import AllocationMode
@@ -45,16 +174,16 @@ from cua_agent.reward import simple_reward_function, CUARolloutResult
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
-def cua_reward_fn(completions, answer, prompt=None, prompt_ids=None, completion_ids=None, **kwargs):
+def cua_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **kwargs):
     """CUA 奖励函数，适配 AReaL 的奖励函数接口。
     
     Args:
+        prompt: 提示文本
         completions: 模型生成的完成文本（字符串或列表）
-        answer: 期望的答案（任务数据）
-        prompt: 提示文本（可选）
-        prompt_ids: 提示 token IDs（可选）
-        completion_ids: 完成 token IDs（可选）
-        **kwargs: 其他参数（可能包含任务信息）
+        prompt_ids: 提示 token IDs
+        completion_ids: 完成 token IDs
+        answer: 期望的答案（任务数据，来自数据集的 "answer" 字段）
+        **kwargs: 其他参数（可能包含任务信息，如 task_id, task_metadata 等）
         
     Returns:
         奖励值（float）
@@ -67,10 +196,11 @@ def cua_reward_fn(completions, answer, prompt=None, prompt_ids=None, completion_
     
     # 从 kwargs 中提取任务信息
     task_id = kwargs.get("task_id", "")
+    task_metadata = kwargs.get("task_metadata", {})
     task_completed = kwargs.get("task_completed", False)
     task_success = kwargs.get("task_success", False)
     num_turns = kwargs.get("num_turns", 0)
-    max_turns = kwargs.get("max_turns", 15)
+    max_turns = kwargs.get("max_turns", task_metadata.get("max_steps", 15))
     errors = kwargs.get("errors", [])
     
     # 构建 CUARolloutResult
