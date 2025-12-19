@@ -1,0 +1,55 @@
+# docker-compose.areal.yml
+# AReaL GRPO 训练 Docker Compose 配置
+
+# version: '3.8'  # Docker Compose v2 不再需要 version 字段
+
+services:
+  # ============ AReaL 训练服务 ============
+  # 注意：vLLM 服务由 AReal 内置管理（allocation_mode: vllm:d4p1t1+d4p1t1）
+  # 不需要独立的 vLLM 容器
+  trainer:
+    build:
+      context: ..  # 构建上下文改为 AReaL 根目录，以便访问 AReaL 源码
+      dockerfile: rl-cua/Dockerfile.areal
+    
+    container_name: areal-cua-trainer
+    
+    # 使用所有 GPU（让 FSDP 自动分配）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./outputs:/workspace/outputs
+    
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
+      - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo.yaml}
+      # 分布式训练环境变量（AReaL 会自动设置）
+      - NCCL_DEBUG=INFO
+    
+    # 注意：不再依赖独立的 vLLM 服务，vLLM 由 AReal 内置管理
+    
+    command: >
+      -m areal.launcher.local
+      train_areal.py
+      --config ${CONFIG_FILE:-configs/cua_grpo.yaml}
+    
+    restart: "no"
+    
+    # 允许共享内存（分布式训练需要）
+    shm_size: '16gb'
+    
+    # 网络配置（分布式通信）
+    ipc: host
+

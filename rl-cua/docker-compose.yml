@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  cua-agent:
+    image: cua-agent:latest
+    container_name: cua-agent
+    build:
+      context: .
+      dockerfile: Dockerfile
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - VLLM_API_BASE=${VLLM_API_BASE:-}
+      - MODEL_NAME=${MODEL_NAME:-unsloth/Qwen3-VL-30B-A3B-Instruct}
+      - BOX_TYPE=${BOX_TYPE:-android}
+      - MAX_TURNS=${MAX_TURNS:-20}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./logs:/workspace/logs
+      - ./outputs:/workspace/outputs
+    # Note: When using network_mode: host, ports mapping is not needed
+    # Ports are directly accessible on the host
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
