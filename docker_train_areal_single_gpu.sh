@@ -60,34 +60,16 @@ fi
 echo "Building Docker images..."
 docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" build
 
-# ============ 启动服务 ============
-echo "Starting vLLM service (using 50% GPU memory)..."
-docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d vllm
-
-# 等待 vLLM 启动
-echo "Waiting for vLLM to be ready..."
-MAX_WAIT=600  # 最多等待 10 分钟
-WAITED=0
-while ! docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T vllm curl -s http://localhost:8000/health > /dev/null 2>&1; do
-    if [ $WAITED -ge $MAX_WAIT ]; then
-        echo "Error: vLLM failed to start within $MAX_WAIT seconds"
-        echo "Check logs with: docker compose -f $COMPOSE_FILE -p $PROJECT_NAME logs vllm"
-        exit 1
-    fi
-    echo "  Waiting... ($WAITED/$MAX_WAIT seconds)"
-    sleep 10
-    WAITED=$((WAITED + 10))
-done
-echo "vLLM is ready!"
-
 # ============ 显示 GPU 使用情况 ============
 echo ""
 echo "Current GPU usage:"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader
 
 # ============ 启动训练 ============
+# 注意：vLLM 服务由 AReal 内置管理（allocation_mode: vllm:d1p1t1+d1p1t1）
+# AReal 会自动启动和管理 vLLM 服务器，无需独立的 vLLM 容器
 echo ""
-echo "Starting AReaL training (using remaining GPU memory)..."
+echo "Starting AReaL training (vLLM will be managed by AReal)..."
 echo "Config: $CONFIG_FILE"
 echo ""
 docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up trainer

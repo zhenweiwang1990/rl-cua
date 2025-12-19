@@ -4,49 +4,9 @@
 # version: '3.8'  # Docker Compose v2 不再需要 version 字段
 
 services:
-  # ============ vLLM 推理服务 ============
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm-cua-areal
-    
-    # 使用所有 GPU（或指定部分 GPU 用于推理）
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all  # 或指定数量
-              capabilities: [gpu]
-    
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-      - ./outputs:/workspace/outputs
-    
-    environment:
-      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
-      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-    
-    command: >
-      --model ${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}
-      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-4}
-      --max-model-len ${MAX_MODEL_LEN:-16384}
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
-      --enable-lora
-      --max-lora-rank 32
-      --trust-remote-code
-    
-    ports:
-      - "8000:8000"
-    
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    
-    restart: unless-stopped
-
   # ============ AReaL 训练服务 ============
+  # 注意：vLLM 服务由 AReal 内置管理（allocation_mode: vllm:d4p1t1+d4p1t1）
+  # 不需要独立的 vLLM 容器
   trainer:
     build:
       context: .
@@ -73,14 +33,12 @@ services:
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
       - HF_TOKEN=${HF_TOKEN:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - VLLM_API_BASE=http://vllm:8000/v1
+      # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
       - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo.yaml}
       # 分布式训练环境变量（AReaL 会自动设置）
       - NCCL_DEBUG=INFO
     
-    depends_on:
-      vllm:
-        condition: service_healthy
+    # 注意：不再依赖独立的 vLLM 服务，vLLM 由 AReal 内置管理
     
     command: >
       -m areal.launcher.local

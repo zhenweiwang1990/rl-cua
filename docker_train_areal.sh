@@ -94,20 +94,10 @@ echo ""
 echo "Building Docker images..."
 docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" build
 
-# ============ 启动服务 ============
-echo "Starting services..."
-docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d vllm
-
-# 等待 vLLM 启动
-echo "Waiting for vLLM to be ready..."
-while ! docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T vllm curl -s http://localhost:8000/health > /dev/null 2>&1; do
-    echo "  Waiting..."
-    sleep 10
-done
-echo "vLLM is ready!"
-
 # ============ 启动训练 ============
-echo "Starting AReaL training..."
+# 注意：vLLM 服务由 AReal 内置管理（allocation_mode: vllm:d4p1t1+d4p1t1）
+# AReal 会自动启动和管理 vLLM 服务器，无需独立的 vLLM 容器
+echo "Starting AReaL training (vLLM will be managed by AReal)..."
 echo "Using config: $CONFIG_FILE"
 # 通过环境变量传递配置文件路径给 docker-compose
 export CONFIG_FILE="$CONFIG_FILE"

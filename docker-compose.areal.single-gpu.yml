@@ -4,53 +4,9 @@
 # version: '3.8'  # Docker Compose v2 不再需要 version 字段
 
 services:
-  # ============ vLLM 推理服务 ============
-  # 注意：单 GPU 时，vLLM 和训练共享同一个 GPU
-  # 需要合理分配 GPU 内存
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: vllm-cua-areal-single
-    
-    # 使用单个 GPU
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-      - ./outputs:/workspace/outputs
-    
-    environment:
-      - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-    
-    # 单 GPU 配置：使用较小的 GPU 内存利用率，为训练留出空间
-    command: >
-      --model ${MODEL_NAME:-Qwen/Qwen3-VL-8B-Instruct}
-      --tensor-parallel-size 1
-      --max-model-len ${MAX_MODEL_LEN:-8192}
-      --gpu-memory-utilization 0.5
-      --enable-lora
-      --max-lora-rank 16
-      --trust-remote-code
-      --max-num-seqs 4
-      --max-num-batched-tokens 2048
-    
-    ports:
-      - "8000:8000"
-    
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    
-    restart: unless-stopped
-
   # ============ AReaL 训练服务 ============
+  # 注意：vLLM 服务由 AReal 内置管理（allocation_mode: vllm:d1p1t1+d1p1t1）
+  # 不需要独立的 vLLM 容器
   trainer:
     build:
       context: .
@@ -58,7 +14,7 @@ services:
     
     container_name: areal-cua-trainer-single
     
-    # 使用同一个 GPU（与 vLLM 共享）
+    # 使用单个 GPU（vLLM 由 AReal 内置管理）
     deploy:
       resources:
         reservations:
@@ -77,14 +33,12 @@ services:
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
       - HF_TOKEN=${HF_TOKEN:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - VLLM_API_BASE=http://vllm:8000/v1
+      # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
       # 单 GPU 训练环境变量
       - CUDA_VISIBLE_DEVICES=0
       - NCCL_DEBUG=INFO
     
-    depends_on:
-      vllm:
-        condition: service_healthy
+    # 注意：不再依赖独立的 vLLM 服务，vLLM 由 AReal 内置管理
     
     command: >
       -m areal.launcher.local

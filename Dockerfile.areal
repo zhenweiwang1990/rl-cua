@@ -22,16 +22,16 @@ WORKDIR /workspace
 COPY requirements-areal.txt .
 RUN pip install --no-cache-dir -r requirements-areal.txt
 
-# ============ 安装 vLLM ============
-# AReaL 的 allocation_mode 需要 vLLM 来启动推理服务器
-# 即使使用外部 vLLM 服务，AReaL launcher 也需要 vLLM 模块
-RUN pip install --no-cache-dir vllm>=0.10.0
-
 # ============ 安装 AReaL ============
 # 从源码安装 AReaL（使用 main 分支，可以改为特定 tag 或 commit）
 # 注意：AReaL 0.5.1 要求 torch==2.8.0，但基础镜像可能有更新的版本
 # 使用 --force-reinstall 和 --no-deps 来避免版本冲突，让 AReaL 自己管理依赖
 RUN pip install --no-cache-dir --force-reinstall git+https://github.com/inclusionAI/AReaL.git@main
+
+# ============ 安装 vLLM ============
+# AReal 官方推荐使用内置 vLLM 服务（allocation_mode: vllm:...）
+# 需要在训练容器中安装 vLLM，以便 AReal 可以自动启动和管理 vLLM 服务器
+RUN pip install --no-cache-dir vllm>=0.10.0
 
 # ============ 安装 GBox ============
 RUN pip install --no-cache-dir git+https://github.com/babelcloud/gbox-cua.git

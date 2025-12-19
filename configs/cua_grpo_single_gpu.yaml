@@ -18,6 +18,9 @@ cluster:
     type: nfs
     nfs_record_root: /workspace/outputs/grpo_cua_single_gpu/name_resolve
 
+# AReal 官方推荐：使用内置 vLLM 服务（由 AReal 自动管理）
+# 格式：vllm:d{devices}p{processes}t{threads}+d{devices}p{processes}t{threads}
+# 第一部分是 vLLM 服务器，第二部分是训练器
 allocation_mode: vllm:d1p1t1+d1p1t1
 
 rollout:
@@ -97,7 +100,7 @@ ref:
     max_tokens_per_mb: 8192
   optimizer: null
 
-# vLLM
+# vLLM 配置（内置 vLLM 服务器，由 AReal 自动启动和管理）
 vllm:
   model: ${actor.path}
   seed: ${seed}
