@@ -743,6 +743,13 @@ def main(args):
             StatsLogger.get_log_path(config.stats_logger), "generated"
         ),
     )
+    
+    # 调试：检查 workflow 是否正确初始化
+    if actual_rank == 0:
+        logger = logging.getLogger(__name__)
+        logger.info(f"[Workflow Init] Workflow type: {type(workflow).__name__}")
+        logger.info(f"[Workflow Init] GBOX_API_KEY present: {bool(workflow.gbox_api_key)}")
+        logger.info(f"[Workflow Init] vLLM API base: {workflow.vllm_api_base}")
     eval_workflow = CUAEnvRolloutWorkflow(
         reward_fn=cua_reward_fn,
         gconfig=config.gconfig.new(temperature=0.6),
@@ -815,12 +822,24 @@ def main(args):
         )
 
         with stats_tracker.record_timing("rollout"):
+            if actual_rank == 0 and global_step == start_step:
+                logger = logging.getLogger(__name__)
+                logger.info(f"[Prepare Batch] Calling prepare_batch with workflow: {type(workflow).__name__}")
+                logger.info(f"[Prepare Batch] Workflow has GBOX_API_KEY: {bool(workflow.gbox_api_key)}")
+            
             batch = actor.prepare_batch(
                 train_dataloader,
                 granularity=actor.config.group_size,
                 workflow=workflow,
                 should_accept_fn=lambda sample: True,
             )
+            
+            if actual_rank == 0 and global_step == start_step:
+                logger = logging.getLogger(__name__)
+                logger.info(f"[Prepare Batch] Batch prepared, keys: {list(batch.keys()) if isinstance(batch, dict) else 'not a dict'}")
+                if isinstance(batch, dict) and "reward" in batch:
+                    rewards = batch.get("reward", [])
+                    logger.info(f"[Prepare Batch] Sample rewards: {rewards[:5] if len(rewards) > 5 else rewards}")
 
         if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
             with stats_tracker.record_timing("recompute_logp"):
