@@ -32,6 +32,7 @@ services:
       - GBOX_API_KEY=${GBOX_API_KEY}
       - HF_TOKEN=${HF_TOKEN:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo_single_gpu.yaml}
       # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
       # 单 GPU 训练环境变量
       - CUDA_VISIBLE_DEVICES=0
@@ -42,7 +43,7 @@ services:
     command: >
       -m areal.launcher.local
       train_areal.py
-      --config /workspace/configs/cua_grpo_single_gpu.yaml
+      --config /workspace/${CONFIG_FILE:-configs/cua_grpo_single_gpu.yaml}
     
     restart: "no"
     
