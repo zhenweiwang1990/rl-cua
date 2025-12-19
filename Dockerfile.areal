@@ -22,6 +22,11 @@ WORKDIR /workspace
 COPY requirements-areal.txt .
 RUN pip install --no-cache-dir -r requirements-areal.txt
 
+# ============ 安装 vLLM ============
+# AReaL 的 allocation_mode 需要 vLLM 来启动推理服务器
+# 即使使用外部 vLLM 服务，AReaL launcher 也需要 vLLM 模块
+RUN pip install --no-cache-dir vllm>=0.10.0
+
 # ============ 安装 AReaL ============
 # 从源码安装 AReaL（使用 main 分支，可以改为特定 tag 或 commit）
 # 注意：AReaL 0.5.1 要求 torch==2.8.0，但基础镜像可能有更新的版本
