@@ -1,28 +1,12 @@
 #!/bin/bash
-# Stop vLLM containers
+# 停止 vLLM 服务
 
-echo "Stopping vLLM containers..."
+set -e
 
-# Stop base server
-if docker ps -a --format '{{.Names}}' | grep -q "^vllm-cua-server$"; then
-    echo "Stopping vllm-cua-server..."
-    docker stop vllm-cua-server 2>/dev/null || true
-    docker rm vllm-cua-server 2>/dev/null || true
-fi
+COMPOSE_FILE="docker-compose.vllm.yml"
+PROJECT_NAME="vllm-cua-areal"
 
-# Stop LoRA server
-if docker ps -a --format '{{.Names}}' | grep -q "^vllm-cua-lora-server$"; then
-    echo "Stopping vllm-cua-lora-server..."
-    docker stop vllm-cua-lora-server 2>/dev/null || true
-    docker rm vllm-cua-lora-server 2>/dev/null || true
-fi
+echo "Stopping vLLM service..."
+docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" down
 
-# Stop any inference containers
-for container in $(docker ps -a --format '{{.Names}}' | grep "^vllm-inference-"); do
-    echo "Stopping $container..."
-    docker stop $container 2>/dev/null || true
-    docker rm $container 2>/dev/null || true
-done
-
-echo "Done!"
-
+echo "✅ vLLM service stopped"

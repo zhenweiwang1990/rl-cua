@@ -1,0 +1,60 @@
+# docker-compose.trainer.yml
+# 训练服务配置（连接到已运行的 vLLM）
+
+services:
+  # ============ AReaL 训练服务 ============
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal
+    
+    container_name: areal-cua-trainer
+    
+    # 使用所有 GPU（让 FSDP 自动分配）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./outputs:/workspace/outputs
+    
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - VLLM_API_BASE=${VLLM_API_BASE:-http://vllm-cua-areal:8000/v1}
+      - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo.yaml}
+      # 分布式训练环境变量
+      - NCCL_DEBUG=INFO
+    
+    # 连接到 vLLM 网络
+    networks:
+      - vllm-network
+    
+    # 注意：不设置 depends_on，因为 vLLM 在另一个 compose 文件中
+    # 脚本会在启动前检查 vLLM 是否可用
+    
+    command: >
+      -m areal.launcher.local
+      train_areal.py
+      --config ${CONFIG_FILE:-configs/cua_grpo.yaml}
+    
+    restart: "no"  # 训练完成后不重启
+    
+    # 允许共享内存
+    shm_size: '8gb'
+    
+    # 网络配置
+    ipc: host
+
+networks:
+  vllm-network:
+    external: true
+    name: vllm-cua-areal_vllm-network
+

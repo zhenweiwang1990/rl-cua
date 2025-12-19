@@ -1,0 +1,62 @@
+# docker-compose.trainer.single-gpu.yml
+# 训练服务配置（单 GPU，连接到已运行的 vLLM）
+
+services:
+  # ============ AReaL 训练服务 ============
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal
+    
+    container_name: areal-cua-trainer-single
+    
+    # 使用单个 GPU（与 vLLM 共享）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    volumes:
+      - .:/workspace
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./outputs:/workspace/outputs
+    
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - VLLM_API_BASE=${VLLM_API_BASE:-http://vllm-cua-areal-single:8000/v1}
+      - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo_single_gpu.yaml}
+      # 单 GPU 训练环境变量
+      - CUDA_VISIBLE_DEVICES=0
+      - NCCL_DEBUG=INFO
+    
+    # 连接到 vLLM 网络
+    networks:
+      - vllm-network
+    
+    # 注意：不设置 depends_on，因为 vLLM 在另一个 compose 文件中
+    # 脚本会在启动前检查 vLLM 是否可用
+    
+    command: >
+      -m areal.launcher.local
+      train_areal.py
+      --config ${CONFIG_FILE:-configs/cua_grpo_single_gpu.yaml}
+    
+    restart: "no"  # 训练完成后不重启
+    
+    # 允许共享内存
+    shm_size: '8gb'
+    
+    # 网络配置
+    ipc: host
+
+networks:
+  vllm-network:
+    external: true
+    name: vllm-cua-areal-single_vllm-network
+
