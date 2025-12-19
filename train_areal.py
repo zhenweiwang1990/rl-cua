@@ -239,18 +239,27 @@ def main(args):
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     
-    # Explicit device assignment to prevent duplicate GPU usage
-    # Set CUDA device based on local rank to ensure each process uses a unique GPU
+    # Explicit device assignment following standard distributed training pattern
+    # Core principle: single GPU is a subset of distributed, not a special case
+    # This ensures code works for both single GPU and multi-GPU without branches
     if torch.cuda.is_available():
-        # For single GPU setup, all processes should use device 0
-        # But we need to ensure only one process per GPU
-        if world_size == 1:
+        num_gpus = torch.cuda.device_count()
+        
+        # Standard distributed pattern: assign GPU based on local_rank
+        # For single GPU (num_gpus=1), all processes use device 0
+        # For multi-GPU, each process gets a unique GPU
+        if num_gpus == 1:
             device_id = 0
         else:
-            # For multi-GPU, use local_rank to assign unique GPUs
-            device_id = local_rank % torch.cuda.device_count()
+            # Multi-GPU: use local_rank to assign unique GPUs
+            device_id = local_rank % num_gpus
+        
         torch.cuda.set_device(device_id)
-        print(f"[Rank {rank}] Using CUDA device {device_id} (local_rank={local_rank}, world_size={world_size})")
+        
+        # Only print from rank 0 to avoid log spam
+        if rank == 0:
+            print(f"[Rank {rank}] CUDA device assignment: device_id={device_id}, "
+                  f"local_rank={local_rank}, world_size={world_size}, num_gpus={num_gpus}")
     
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
@@ -262,6 +271,15 @@ def main(args):
     # Initialize train engine
     actor = FSDPPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
+    
+    # Check actual world_size after process group creation
+    # This ensures we use the correct weight update mode based on actual distributed setup
+    actual_world_size = dist.get_world_size() if dist.is_initialized() else 1
+    actual_rank = dist.get_rank() if dist.is_initialized() else 0
+    
+    if actual_rank == 0:
+        print(f"[Rank {actual_rank}] Detected world_size={actual_world_size}, "
+              f"data_parallel_world_size={actor.data_parallel_world_size}")
 
     # Create dataset and dataloaders
     train_dataset = get_custom_dataset(
@@ -297,7 +315,36 @@ def main(args):
     eval_rollout.config.max_head_offpolicyness = int(1e12)
     eval_rollout.initialize()
 
-    if config.actor.weight_update_mode == "xccl":
+    # Core principle: world_size=1 should use local update, not distributed
+    # This makes the code work for both single GPU and multi-GPU without code branches
+    # 
+    # If world_size == 1 OR only one GPU is visible, force disk mode to avoid NCCL collective operations
+    # This is the standard distributed training pattern: single GPU is a subset of distributed
+    effective_world_size = actual_world_size if dist.is_initialized() else 1
+    effective_dp_size = actor.data_parallel_world_size if hasattr(actor, 'data_parallel_world_size') else 1
+    num_visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    
+    # Determine weight update mode based on actual distributed setup
+    # Key check: if only one GPU is visible, we must use disk mode to avoid duplicate GPU errors
+    # Even if AReaL launcher creates multiple ranks, they'll all map to the same GPU
+    if effective_world_size == 1 or effective_dp_size == 1 or num_visible_gpus == 1:
+        # Single GPU / single process: use disk mode (local update)
+        # This avoids NCCL operations that would fail with duplicate GPU detection
+        if actual_rank == 0:
+            print(f"[Rank {actual_rank}] Single GPU mode detected "
+                  f"(world_size={effective_world_size}, dp_size={effective_dp_size}, "
+                  f"visible_gpus={num_visible_gpus}), using 'disk' mode for weight updates")
+        weight_update_mode = "disk"
+    else:
+        # Multi-GPU: use configured mode (xccl for distributed, disk for local)
+        weight_update_mode = config.actor.weight_update_mode
+        if actual_rank == 0:
+            print(f"[Rank {actual_rank}] Multi-GPU mode detected "
+                  f"(world_size={effective_world_size}, dp_size={effective_dp_size}, "
+                  f"visible_gpus={num_visible_gpus}), using '{weight_update_mode}' mode for weight updates")
+    
+    # Create weight update metadata based on determined mode
+    if weight_update_mode == "xccl":
         weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(
             allocation_mode,
             use_lora=config.actor.use_lora,
@@ -305,7 +352,7 @@ def main(args):
             lora_int_id=1,  # hard coded for the single lora example
             base_model_name=config.actor.path,
         )
-    elif config.actor.weight_update_mode == "disk":
+    elif weight_update_mode == "disk":
         weight_update_meta = WeightUpdateMeta.from_disk(
             config.saver.experiment_name,
             config.saver.trial_name,
@@ -317,7 +364,7 @@ def main(args):
         )
     else:
         raise ValueError(
-            f"Invalid weight_update_mode: {config.actor.weight_update_mode}. Expected 'xccl' or 'disk'."
+            f"Invalid weight_update_mode: {weight_update_mode}. Expected 'xccl' or 'disk'."
         )
 
     actor.initialize(None, ft_spec)
