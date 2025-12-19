@@ -83,6 +83,7 @@ def _get_cua_rl_dataset(
             result["task_id"] = item.get("id", "")
             # 将 task 的所有可序列化字段保存到 task_metadata 中
             # 这样 workflow 可以重新构建 task 对象
+            # 注意：将 task_metadata 序列化为 JSON 字符串，避免 PyArrow 类型推断问题
             task_metadata = metadata.copy() if metadata else {}
             # 添加 task 的完整信息到 metadata（使用 task_dict 中的所有字段）
             task_metadata.update({
@@ -98,7 +99,8 @@ def _get_cua_rl_dataset(
                 "tags": task_dict.get("tags", []),
                 "prerequisites": task_dict.get("prerequisites", []),
             })
-            result["task_metadata"] = task_metadata
+            # 序列化为 JSON 字符串，避免 PyArrow 类型推断问题
+            result["task_metadata"] = json.dumps(task_metadata, ensure_ascii=False)
         
         return result
     
@@ -387,7 +389,15 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
     
     def _build_task(self, sample: dict) -> CUATask:
         """从 sample 构建 CUATask。"""
-        task_metadata = sample.get("task_metadata", {}) or {}
+        # task_metadata 现在是 JSON 字符串，需要反序列化
+        task_metadata_str = sample.get("task_metadata", "")
+        if isinstance(task_metadata_str, str):
+            try:
+                task_metadata = json.loads(task_metadata_str) if task_metadata_str else {}
+            except (json.JSONDecodeError, TypeError):
+                task_metadata = {}
+        else:
+            task_metadata = task_metadata_str or {}
         
         # 从 task_metadata 中获取所有信息
         task_id = task_metadata.get("task_id") or sample.get("task_id", "") or f"task_{datetime.now().strftime('%H%M%S')}"

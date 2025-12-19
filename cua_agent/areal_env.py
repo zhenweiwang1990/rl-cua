@@ -26,6 +26,7 @@ from gbox_cua.prompts import create_system_prompt
 from cua_agent.tasks import CUATask
 from cua_agent.actions import parse_action, ActionType
 from cua_agent.tools import get_tools_schema, tool_call_to_action_dict
+from cua_agent.reward import validate_task_completion
 
 logger = logging.getLogger(__name__)
 
@@ -263,10 +264,31 @@ class GBoxActorEnv:
         # 检查是否是 task_complete
         if action.action_type == ActionType.TASK_COMPLETE:
             self.task_completed = True
-            self.task_success = getattr(action, 'success', False)
             result_message = getattr(action, 'result_message', '')
+            agent_reported_success = getattr(action, 'success', False)
             
-            logger.info(f"[Turn {self.num_turns}] Task complete: success={self.task_success}, message={result_message}")
+            # 使用环境验证任务完成状态（基于 ADB/shell 命令）
+            # 如果任务定义了 validation_query，则使用验证函数；否则回退到 agent 报告的状态
+            if self.task.validation_query and self.task.expected_result is not None:
+                try:
+                    self.task_success = await validate_task_completion(self.task, self.gbox_client)
+                    logger.info(
+                        f"[Turn {self.num_turns}] Task complete: "
+                        f"agent_reported={agent_reported_success}, "
+                        f"verified={self.task_success}, "
+                        f"message={result_message}"
+                    )
+                except Exception as e:
+                    logger.error(f"[Turn {self.num_turns}] Verification failed: {e}, falling back to agent report")
+                    self.task_success = agent_reported_success
+            else:
+                # 没有定义验证查询，使用 agent 报告的状态
+                self.task_success = agent_reported_success
+                logger.info(
+                    f"[Turn {self.num_turns}] Task complete: "
+                    f"success={self.task_success} (agent reported, no validation_query), "
+                    f"message={result_message}"
+                )
             
             # 记录这一轮
             record = TurnRecord(
