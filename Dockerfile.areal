@@ -18,6 +18,9 @@ RUN uv pip install --no-build-isolation --system --no-cache-dir \
 # 复制 rl-cua 项目代码到工作目录
 COPY rl-cua /workspace
 
+# ============ 设置工作目录 ============
+WORKDIR /workspace
+
 # ============ 入口点 ============
 ENTRYPOINT ["python"]
 CMD ["train_areal.py", "--config", "configs/cua_grpo.yaml"]
