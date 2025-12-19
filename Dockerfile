@@ -28,8 +28,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install torchvision
 
-# ========== Unsloth (for GRPO LoRA training) ==========
+# ========== Unsloth (for legacy GRPO LoRA training) ==========
 # Note: Unsloth is installed from GitHub. Requires a GPU-enabled environment.
+# For AReaL training, use Dockerfile.areal instead which uses standard HuggingFace + PEFT
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 

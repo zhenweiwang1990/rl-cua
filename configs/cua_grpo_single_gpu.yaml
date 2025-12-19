@@ -1,0 +1,139 @@
+# configs/cua_grpo_single_gpu.yaml
+# CUA Agent GRPO 训练配置 - 单 GPU (H200) 优化版
+
+# ============ 模型配置 ============
+model:
+  name: "Qwen/Qwen3-VL-8B-Instruct"  # 使用较小的模型（8B 适合单 GPU）
+  # 或者如果 H200 内存足够，可以使用 32B 模型
+  # name: "Qwen/Qwen3-VL-32B-Instruct"
+  max_seq_length: 8192  # 减少序列长度以节省内存
+  torch_dtype: "bfloat16"
+  trust_remote_code: true
+  
+  # LoRA 配置（静态 LoRA）
+  use_lora: true
+  lora:
+    r: 8  # 减少 LoRA rank 以节省内存
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+    bias: "none"
+    task_type: "CAUSAL_LM"
+
+# ============ 训练配置 ============
+training:
+  # 基础参数
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  
+  # 批次配置（单 GPU 需要小 batch size）
+  batch_size: 1  # 每 GPU 的任务数（单 GPU 时设为 1）
+  gradient_accumulation_steps: 4  # 通过梯度累积模拟更大的 batch
+  
+  # 训练进度
+  max_steps: 200
+  warmup_steps: 10
+  
+  # 评估和保存
+  eval_steps: 10
+  save_steps: 10
+  save_total_limit: 5
+  
+  # 最佳模型
+  load_best_model_at_end: true
+  metric_for_best_model: "eval/accuracy"
+  greater_is_better: true
+  
+  # 早停
+  early_stopping_patience: 5
+  target_accuracy: 0.80
+  
+  # 输出
+  output_dir: "outputs/grpo_cua_single_gpu"
+  seed: 42
+
+# ============ GRPO 算法配置 ============
+grpo:
+  beta: 0.01  # KL 惩罚系数
+  clip_epsilon: 0.2  # PPO clip 参数
+  min_group_std: 0.05  # 最小组标准差
+  advantage_normalization: true
+
+# ============ Rollout 配置 ============
+rollout:
+  # 基础参数
+  num_rollouts: 2  # 减少 rollout 数量（单 GPU 资源有限）
+  max_turns: 10  # 减少最大回合数以加快训练
+  
+  # 并发（单 GPU 时设为 1）
+  concurrency: 1  # 单 GPU 只能串行处理
+  
+  # 异步配置
+  async_mode: false  # 单 GPU 时关闭异步模式
+  interruptible: true  # 可中断生成
+  
+  # 数据陈旧度控制
+  max_staleness: 3  # 减少陈旧度容忍度
+  
+  # 温度变化（用于探索）
+  enable_temperature_variation: true
+  base_temperature: 0.6
+  temperature_increment: 0.1
+  
+  # 环境配置
+  gbox:
+    box_type: "android"
+    timeout: "60s"
+    expires_in: "15m"
+  
+  # 延迟
+  action_delay: 0.5
+  screenshot_delay: 0.3
+
+# ============ 推理配置 ============
+inference:
+  backend: "vllm"  # 或 "sglang"
+  
+  vllm:
+    api_base: "http://localhost:8000/v1"
+    max_tokens: 1024  # 减少生成长度以节省内存
+    temperature: 0.7
+    top_p: 0.9
+    timeout: 120.0
+    max_retries: 3
+
+# ============ 分布式训练配置 ============
+distributed:
+  backend: "no"  # 单 GPU 不使用分布式
+  
+  # 单 GPU 训练配置
+  single_gpu: true
+  device: "cuda:0"
+
+# ============ 日志和监控 ============
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_file: "outputs/grpo_cua_single_gpu/logs/training.log"
+  enable_detailed_logging: true
+  detailed_log_file: "outputs/grpo_cua_single_gpu/logs/rollouts.log"
+
+monitoring:
+  enable_wandb: true
+  wandb_project: "cua-grpo-single-gpu"
+  wandb_entity: null  # 可选
+  enable_tensorboard: false
+
+# ============ Checkpoint 配置 ============
+checkpoint:
+  resume_from_checkpoint: null  # 或指定路径
+  ignore_data_skip: false
+

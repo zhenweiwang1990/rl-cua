@@ -1548,6 +1548,55 @@ Guidelines:
 Maximum steps allowed: {task.max_steps}"""
 
 
+# =============================================================================
+# AReaL 格式导出
+# =============================================================================
+
+def create_areal_task_dataset(tasks: List[CUATask]) -> List[Dict]:
+    """将 CUA 任务转换为 AReaL 数据集格式。
+    
+    注意：这里只存储任务描述，实际的提示语生成由 gbox-cua 的 create_system_prompt 处理。
+    
+    Args:
+        tasks: CUA 任务列表
+        
+    Returns:
+        AReaL 格式的任务列表
+    """
+    # 导入 gbox-cua 的提示语生成函数
+    from gbox_cua.prompts import create_system_prompt
+    
+    dataset = []
+    for task in tasks:
+        # 使用 gbox-cua 的提示语生成逻辑
+        prompt = create_system_prompt(
+            task_description=task.description,
+            max_turns=task.max_steps,
+        )
+        dataset.append({
+            "id": task.id,
+            "task": task,
+            "prompt": prompt,
+            "metadata": {
+                "name": task.name,
+                "difficulty": task.difficulty.value,
+                "category": task.category.value,
+                "max_steps": task.max_steps,
+            },
+        })
+    return dataset
+
+
+def get_areal_train_dataset():
+    """获取 AReaL 格式的训练数据集。"""
+    return create_areal_task_dataset(get_training_tasks())
+
+
+def get_areal_eval_dataset():
+    """获取 AReaL 格式的评估数据集。"""
+    return create_areal_task_dataset(get_eval_tasks())
+
+
 __all__ = [
     "CUATask",
     "TaskDifficulty", 
@@ -1562,5 +1611,8 @@ __all__ = [
     "get_tasks_by_difficulty",
     "create_task_prompt",
     "create_task_system_prompt",
+    "create_areal_task_dataset",
+    "get_areal_train_dataset",
+    "get_areal_eval_dataset",
 ]
 

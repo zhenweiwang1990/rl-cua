@@ -316,18 +316,66 @@ MODEL_HUB=modelscope ./scripts/run_vllm_lora.sh
 
 **Note:** When using ModelScope, the scripts will automatically install the `modelscope` Python package.
 
-## GRPO Training (Coming Soon)
+## AReaL GRPO Training
 
-The agent is designed for Group Relative Policy Optimization (GRPO) training:
+The project now supports training using the AReaL framework for Group Relative Policy Optimization (GRPO).
 
-- **Rubric**: Evaluation metrics are captured in `CUARubric`
-- **Reward Function**: `calculate_reward()` computes rewards for training
-- **Diverse Rollouts**: Dynamic temperature for exploration
+### Quick Start
 
-Future additions:
-- Benchmark tasks
-- Reward model training
-- GRPO training loop integration
+#### 1. Install Dependencies
+
+```bash
+pip install -r requirements-areal.txt
+```
+
+#### 2. Configuration
+
+Edit `configs/cua_grpo.yaml` and `.env` files.
+
+#### 3. Start Training
+
+```bash
+# Using Docker (recommended)
+./docker_train_areal.sh
+
+# Or directly
+python -m areal.launcher.local train_areal.py --config configs/cua_grpo.yaml
+```
+
+#### 4. Resume Training
+
+```bash
+python -m areal.launcher.local train_areal.py --config configs/cua_grpo.yaml --resume
+```
+
+### AReaL Training Features
+
+- **Asynchronous Rollout Collection**: Parallel rollout collection with configurable concurrency
+- **Interruptible Generation**: Stop generation early when task is completed
+- **Staleness Control**: Manage data freshness during async rollouts
+- **FSDP Support**: Automatic GPU allocation with FSDP
+- **Static LoRA**: LoRA adapters attached to the model (no dynamic switching)
+- **Built-in Checkpointing**: Automatic checkpoint saving and resuming
+
+### Configuration
+
+Main configuration is in `configs/cua_grpo.yaml`:
+
+- Model settings (name, LoRA parameters)
+- Training hyperparameters (learning rate, batch size, etc.)
+- GRPO algorithm parameters (beta, clip_epsilon, etc.)
+- Rollout configuration (num_rollouts, concurrency, etc.)
+- Inference settings (vLLM backend configuration)
+- Distributed training (FSDP settings)
+
+Environment variables (in `.env`):
+- `GBOX_API_KEY`: GBox API key (required)
+- `HF_ENDPOINT`: HuggingFace endpoint (default: https://hf-mirror.com)
+- `WANDB_API_KEY`: Weights & Biases API key (optional)
+
+### Legacy GRPO Training
+
+The original custom GRPO trainer is still available but deprecated. See `GRPO_TRAINING.md` for details.
 
 ## API Reference
 

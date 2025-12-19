@@ -1,83 +1,63 @@
-"""CUA (Computer Use Agent) for GRPO training."""
+"""CUA (Computer Use Agent) for AReaL GRPO training."""
 
+# Core modules
 from cua_agent.config import CUAConfig, GBoxConfig
-from gbox_cua.gbox_client import GBoxClient
-from cua_agent.actions import ActionType, Target, CUAAction, parse_action, action_to_dict
-from cua_agent.tools import CUA_TOOLS_SCHEMA, get_tools_schema
 from cua_agent.agent import CUAAgent
+from cua_agent.actions import ActionType, parse_action
 
-# GRPO Training modules
+# Reward
+from cua_agent.reward import (
+    CUARolloutResult,
+    simple_reward_function,
+    calculate_grpo_advantages,
+)
+
+# Tasks
 from cua_agent.tasks import (
     CUATask,
     TaskDifficulty,
     TaskCategory,
-    TRAINING_TASKS,
-    EVAL_TASKS,
     get_training_tasks,
     get_eval_tasks,
-    get_task_by_id,
-    create_task_prompt,
-    create_task_system_prompt,
+    get_areal_train_dataset,
+    get_areal_eval_dataset,
 )
-from cua_agent.grpo_config import (
-    GRPOConfig,
-    LoRAConfig,
-    VLLMConfig,
-    RolloutConfig,
+
+# AReaL environment
+from cua_agent.areal_env import (
+    GBoxEnvConfig,
+    GBoxAReaLEnv,
+    create_env_factory,
 )
-from cua_agent.reward import (
-    CUARolloutResult,
-    simple_reward_function,
-    completion_reward_function,
-    efficiency_reward_function,
-    RewardTracker,
-    calculate_grpo_advantages,
-)
-from cua_agent.vllm_client import VLLMClient, VLLMResponse, VLLMRolloutCollector
-from cua_agent.grpo_trainer import CUAGRPOTrainer, TrainingMetrics
 
 __all__ = [
-    # Core agent
+    # Config
     "CUAConfig",
     "GBoxConfig",
-    "GBoxClient",
-    "ActionType",
-    "Target",
-    "CUAAction",
-    "parse_action",
-    "action_to_dict",
-    "CUA_TOOLS_SCHEMA",
-    "get_tools_schema",
+    
+    # Agent
     "CUAAgent",
+    
+    # Actions
+    "ActionType",
+    "parse_action",
+    
+    # Reward
+    "CUARolloutResult",
+    "simple_reward_function",
+    "calculate_grpo_advantages",
+    
     # Tasks
     "CUATask",
     "TaskDifficulty",
     "TaskCategory",
-    "TRAINING_TASKS",
-    "EVAL_TASKS",
     "get_training_tasks",
     "get_eval_tasks",
-    "get_task_by_id",
-    "create_task_prompt",
-    "create_task_system_prompt",
-    # GRPO Config
-    "GRPOConfig",
-    "LoRAConfig",
-    "VLLMConfig",
-    "RolloutConfig",
-    # Rewards
-    "CUARolloutResult",
-    "simple_reward_function",
-    "completion_reward_function",
-    "efficiency_reward_function",
-    "RewardTracker",
-    "calculate_grpo_advantages",
-    # vLLM Client
-    "VLLMClient",
-    "VLLMResponse",
-    "VLLMRolloutCollector",
-    # Trainer
-    "CUAGRPOTrainer",
-    "TrainingMetrics",
+    "get_areal_train_dataset",
+    "get_areal_eval_dataset",
+    
+    # AReaL Environment
+    "GBoxEnvConfig",
+    "GBoxAReaLEnv",
+    "create_env_factory",
 ]
-

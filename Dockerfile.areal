@@ -1,0 +1,40 @@
+# Dockerfile.areal
+# AReaL GRPO 训练 Docker 镜像
+
+# 使用更新的 PyTorch 基础镜像
+# PyTorch 2.4.0+ 支持 CUDA 12.1+
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn8-devel
+
+# ============ 基础设置 ============
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# ============ 系统依赖 ============
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# ============ 工作目录 ============
+WORKDIR /workspace
+
+# ============ Python 依赖 ============
+COPY requirements-areal.txt .
+RUN pip install --no-cache-dir -r requirements-areal.txt
+
+# ============ 安装 AReaL ============
+# 从源码安装 AReaL
+RUN pip install --no-cache-dir git+https://github.com/inclusionAI/AReaL.git
+
+# ============ 安装 GBox ============
+RUN pip install --no-cache-dir git+https://github.com/babelcloud/gbox-cua.git
+
+# ============ 复制代码 ============
+COPY . .
+
+# ============ 入口点 ============
+ENTRYPOINT ["python"]
+CMD ["train_areal.py", "--config", "configs/cua_grpo.yaml"]
+
