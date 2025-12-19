@@ -66,7 +66,7 @@ docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d vllm
 
 # 等待 vLLM 启动
 echo "Waiting for vLLM to be ready..."
-MAX_WAIT=300  # 最多等待 5 分钟
+MAX_WAIT=600  # 最多等待 10 分钟
 WAITED=0
 while ! docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" exec -T vllm curl -s http://localhost:8000/health > /dev/null 2>&1; do
     if [ $WAITED -ge $MAX_WAIT ]; then
