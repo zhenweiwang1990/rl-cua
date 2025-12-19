@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""AReaL GRPO 训练脚本。
+"""AReaL GRPO 训练脚本 - Actor 驱动环境版本。
 
 使用 AReaL 框架训练 CUA Agent。
+训练中的 actor（通过 AReaL 管理的 vLLM）直接驱动 GBox 环境交互。
 
 用法：
     # 单节点多 GPU
@@ -17,17 +18,32 @@
 import os
 import sys
 import warnings
+import logging
+import asyncio
+import json
 from copy import deepcopy
+from datetime import datetime
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset
+from openai import AsyncOpenAI
+
+# Configure logging for CUA Agent
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    force=True,
+)
+
+logging.getLogger('cua_agent').setLevel(logging.INFO)
+logging.getLogger('gbox_cua').setLevel(logging.INFO)
+logging.getLogger('areal').setLevel(logging.INFO)
 
 # ============ Patch AReaL dataset module to support CUA dataset ============
-# This must be done before importing get_custom_dataset
 import areal.dataset as areal_dataset_module
 
-# Store the original function
 _original_get_custom_dataset = areal_dataset_module._get_custom_dataset
 
 def _get_cua_rl_dataset(
@@ -37,69 +53,45 @@ def _get_cua_rl_dataset(
     max_length: int | None = None,
     **kwargs,
 ):
-    """Load CUA dataset for RL training.
-    
-    Supports paths like:
-    - cua_agent.tasks:get_areal_train_dataset
-    - cua_agent.tasks:get_areal_eval_dataset
-    """
-    # Parse the function path
+    """Load CUA dataset for RL training."""
     if ":" in path:
         module_path, func_name = path.split(":", 1)
     else:
-        # Fallback: try to import from cua_agent.tasks
         module_path = "cua_agent.tasks"
         func_name = "get_areal_train_dataset" if split == "train" else "get_areal_eval_dataset"
     
-    # Import the function dynamically
     import importlib
     module = importlib.import_module(module_path)
     get_dataset_func = getattr(module, func_name)
-    
-    # Get the raw dataset (list of dicts)
     raw_data = get_dataset_func()
     
-    # Convert to HuggingFace Dataset format
-    # AReaL expects format: {"messages": [{"role": "user", "content": "..."}]}
     def process_item(item):
-        # Extract prompt from the item
         prompt = item.get("prompt", "")
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         else:
-            # If prompt is already in messages format, use it
             messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
         
-        # Store task info for reward function
-        # AReaL will pass this through kwargs to the reward function
         task = item.get("task")
         task_dict = task.to_dict() if hasattr(task, "to_dict") else (task if task else {})
         metadata = item.get("metadata", {})
         
-        # Create the dataset item
-        # Note: AReaL RL datasets typically have "messages" and optionally "answer" or task info
-        result = {
-            "messages": messages,
-        }
+        result = {"messages": messages}
         
-        # Store task information that can be accessed by the reward function
-        # We'll store it in a way that can be passed through the workflow
         if task_dict:
-            # Store task description as "answer" field (used by some AReaL workflows)
             result["answer"] = task_dict.get("description", "")
-            # Also store full task info for reward function
             result["task_id"] = item.get("id", "")
             result["task_metadata"] = metadata
+            # 保存完整的 task 对象引用（用于 workflow）
+            result["_task_obj"] = task
         
         return result
     
     processed_data = [process_item(item) for item in raw_data]
     dataset = Dataset.from_list(processed_data)
     
-    # Filter by max_length if provided
     if max_length is not None and tokenizer is not None:
         def filter_length(sample):
-            # Tokenize the user content to check length
             messages = sample.get("messages", [])
             if messages:
                 content = messages[0].get("content", "")
@@ -107,7 +99,6 @@ def _get_cua_rl_dataset(
                     tokens = tokenizer.encode(content, add_special_tokens=False)
                     return len(tokens) <= max_length
             return True
-        
         dataset = dataset.filter(filter_length)
     
     return dataset
@@ -123,7 +114,6 @@ def _patched_get_custom_dataset(
     **kwargs,
 ):
     """Patched version of _get_custom_dataset that supports CUA dataset."""
-    # Check if this is a CUA dataset
     if ("cua" in path.lower() or "cua_agent" in path) and type == "rl":
         return _get_cua_rl_dataset(
             path=path,
@@ -133,7 +123,6 @@ def _patched_get_custom_dataset(
             **kwargs,
         )
     
-    # Otherwise, use the original function
     return _original_get_custom_dataset(
         path=path,
         type=type,
@@ -144,14 +133,12 @@ def _patched_get_custom_dataset(
         **kwargs,
     )
 
-# Apply the patch
 areal_dataset_module._get_custom_dataset = _patched_get_custom_dataset
-# Update VALID_DATASETS to include cua
 if "cua" not in areal_dataset_module.VALID_DATASETS:
     areal_dataset_module.VALID_DATASETS.append("cua")
 # ============ End of patch ============
 
-# AReaL imports - 使用官方 API
+# AReaL imports
 from areal.api.alloc_mode import AllocationMode
 from areal.api.cli_args import GRPOConfig, load_expr_config
 from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
@@ -170,64 +157,382 @@ from areal.utils.stats_logger import StatsLogger
 from areal.workflow.rlvr import RLVRWorkflow
 
 # 项目 imports
-from cua_agent.reward import simple_reward_function, CUARolloutResult
+from cua_agent.tasks import CUATask, TaskDifficulty, TaskCategory
+from cua_agent.areal_env import GBoxEnvConfig, GBoxActorEnv
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 def cua_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **kwargs):
-    """CUA 奖励函数，适配 AReaL 的奖励函数接口。
+    """CUA 奖励函数 - 直接使用 workflow 传入的终局奖励。"""
+    logger = logging.getLogger(__name__)
     
-    Args:
-        prompt: 提示文本
-        completions: 模型生成的完成文本（字符串或列表）
-        prompt_ids: 提示 token IDs
-        completion_ids: 完成 token IDs
-        answer: 期望的答案（任务数据，来自数据集的 "answer" 字段）
-        **kwargs: 其他参数（可能包含任务信息，如 task_id, task_metadata 等）
-        
-    Returns:
-        奖励值（float）
-    """
-    # 如果 completions 是列表，取第一个
     if isinstance(completions, list):
         completion = completions[0] if completions else ""
     else:
         completion = completions
     
-    # 从 kwargs 中提取任务信息
-    task_id = kwargs.get("task_id", "")
-    task_metadata = kwargs.get("task_metadata", {})
-    task_completed = kwargs.get("task_completed", False)
-    task_success = kwargs.get("task_success", False)
-    num_turns = kwargs.get("num_turns", 0)
-    max_turns = kwargs.get("max_turns", task_metadata.get("max_steps", 15))
-    errors = kwargs.get("errors", [])
+    # 直接使用 workflow 传入的 reward
+    reward = kwargs.get("reward")
+    if reward is None:
+        task_success = kwargs.get("task_success", False)
+        task_completed = kwargs.get("task_completed", False)
+        reward = 1.0 if (task_success or task_completed) else 0.0
     
-    # 构建 CUARolloutResult
-    rollout_result = CUARolloutResult(
-        task_id=task_id,
-        task_completed=task_completed,
-        task_success=task_success,
-        num_turns=num_turns,
-        max_turns=max_turns,
-        errors=errors,
-    )
+    try:
+        reward = float(reward)
+    except Exception:
+        reward = 0.0
     
-    # 使用现有的奖励函数
-    # 注意：simple_reward_function 需要 task 对象，这里我们创建一个简单的任务对象
-    class SimpleTask:
-        def __init__(self, task_id, description):
-            self.id = task_id
-            self.description = description
+    rank = int(os.getenv("RANK", "0"))
+    if rank == 0:
+        task_id = kwargs.get("task_id", "N/A")
+        num_turns = kwargs.get("num_turns", 0)
+        max_turns = kwargs.get("max_turns", 15)
+        task_success = kwargs.get("task_success", False)
+        errors = kwargs.get("errors", [])
+        
+        logger.info("=" * 80)
+        logger.info(f"[CUA Rollout Complete] Task ID: {task_id}")
+        logger.info(f"  Turns: {num_turns}/{max_turns}")
+        logger.info(f"  Task Success: {task_success}")
+        logger.info(f"  Reward: {reward:.4f}")
+        if errors:
+            logger.info(f"  Errors ({len(errors)}): {errors[:3]}")
+        logger.info("=" * 80)
     
-    task = SimpleTask(
-        task_id=task_id,
-        description=answer if isinstance(answer, str) else str(answer)
-    )
-    
-    reward = simple_reward_function(rollout_result, task)
     return reward
+
+
+class CUAEnvRolloutWorkflow(RLVRWorkflow):
+    """Workflow：训练中的 actor 直接驱动 GBox 环境交互。
+    
+    核心流程：
+    1. 为每个 sample 创建 GBoxActorEnv
+    2. 使用 AsyncOpenAI 客户端调用 AReaL 管理的 vLLM
+    3. 多轮交互：构造 messages → vLLM 生成 tool_call → 环境执行 → 更新上下文
+    4. 终局计算 reward（1/0）
+    5. 返回带有 reward 的 sample
+    """
+
+    def __init__(self, *args, **kwargs):
+        # 提取自定义参数
+        self.gbox_api_key = kwargs.pop("gbox_api_key", None) or os.getenv("GBOX_API_KEY", "")
+        self.gbox_model = kwargs.pop("gbox_model", None) or os.getenv("GBOX_MODEL", "gbox-handy-1")
+        self.max_turns = kwargs.pop("max_turns", None) or int(os.getenv("CUA_MAX_TURNS", "15"))
+        self.context_window = kwargs.pop("context_window", None) or int(os.getenv("CUA_CONTEXT_WINDOW", "5"))
+        self.trace_dir = kwargs.pop("trace_dir", None)
+        
+        # vLLM 端点：AReaL 内置 vLLM 默认在 localhost:8000 启动
+        # 不需要用户配置，AReaL 自动管理
+        self.vllm_api_base = "http://localhost:8000/v1"
+        self.model_name = kwargs.pop("model_name", None) or ""
+        
+        super().__init__(*args, **kwargs)
+        
+        self._logger = logging.getLogger(__name__)
+        
+        if not self.gbox_api_key:
+            self._logger.warning(
+                "CUAEnvRolloutWorkflow initialized without GBOX_API_KEY; "
+                "will fall back to text-only workflow."
+            )
+    
+    def _build_env_config(self) -> GBoxEnvConfig:
+        """构建环境配置。"""
+        return GBoxEnvConfig(
+            gbox_api_key=self.gbox_api_key,
+            gbox_model=self.gbox_model,
+            box_type="android",
+            timeout="60s",
+            wait=30,
+            expires_in="15m",
+            action_delay=0.5,
+            screenshot_delay=0.3,
+            max_turns=self.max_turns,
+            context_window=self.context_window,
+            trace_dir=self.trace_dir,
+        )
+    
+    def _parse_action_from_text(self, text: str, turn: int) -> dict:
+        """从模型输出的文本中解析动作（备选模式）。
+        
+        支持以下格式：
+        1. JSON 格式: {"action": "click", "target": "..."}
+        2. 函数调用格式: click(target="...")
+        3. Markdown 代码块中的 JSON
+        """
+        import re
+        
+        # 尝试从 Markdown 代码块中提取 JSON
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                action_data = json.loads(json_match.group(1))
+                return self._action_data_to_tool_call(action_data, turn)
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试直接解析 JSON
+        try:
+            # 查找第一个 { 到最后一个 }
+            start = text.find('{')
+            end = text.rfind('}')
+            if start != -1 and end != -1 and start < end:
+                json_str = text[start:end+1]
+                action_data = json.loads(json_str)
+                return self._action_data_to_tool_call(action_data, turn)
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试解析函数调用格式
+        func_match = re.search(r'(\w+)\s*\(([^)]*)\)', text)
+        if func_match:
+            func_name = func_match.group(1).lower()
+            args_str = func_match.group(2)
+            
+            # 简单解析参数
+            args = {}
+            for arg_match in re.finditer(r'(\w+)\s*=\s*["\']([^"\']*)["\']', args_str):
+                args[arg_match.group(1)] = arg_match.group(2)
+            
+            return {
+                "id": f"call_{turn}",
+                "function": {
+                    "name": func_name,
+                    "arguments": json.dumps(args),
+                },
+            }
+        
+        # 检查是否包含 task_complete 相关关键词
+        if any(kw in text.lower() for kw in ["task complete", "completed", "done", "finished"]):
+            success = any(kw in text.lower() for kw in ["success", "successfully", "accomplished"])
+            return {
+                "id": f"call_{turn}_complete",
+                "function": {
+                    "name": "task_complete",
+                    "arguments": json.dumps({"success": success, "message": text[:200]}),
+                },
+            }
+        
+        # 无法解析，默认返回 task_complete with failure
+        self._logger.warning(
+            f"[Turn {turn}] Could not parse action from text: {text[:100]}..."
+        )
+        return {
+            "id": f"call_{turn}_parse_failed",
+            "function": {
+                "name": "task_complete",
+                "arguments": json.dumps({
+                    "success": False,
+                    "message": f"Failed to parse action from model output: {text[:100]}",
+                }),
+            },
+        }
+    
+    def _action_data_to_tool_call(self, action_data: dict, turn: int) -> dict:
+        """将解析的动作数据转换为 tool_call 格式。"""
+        action_type = action_data.get("action", action_data.get("type", ""))
+        
+        # 构建参数
+        args = {}
+        for key in ["target", "text", "direction", "duration", "key", "button", "success", "message"]:
+            if key in action_data:
+                args[key] = action_data[key]
+        
+        return {
+            "id": f"call_{turn}",
+            "function": {
+                "name": action_type or "task_complete",
+                "arguments": json.dumps(args),
+            },
+        }
+    
+    def _build_task(self, sample: dict) -> CUATask:
+        """从 sample 构建 CUATask。"""
+        # 尝试获取保存的 task 对象
+        task_obj = sample.get("_task_obj")
+        if task_obj and isinstance(task_obj, CUATask):
+            return task_obj
+        
+        task_id = sample.get("task_id", "") or f"task_{datetime.now().strftime('%H%M%S')}"
+        task_metadata = sample.get("task_metadata", {}) or {}
+        task_description = sample.get("answer") or sample.get("messages", [{}])[0].get("content", "")
+        
+        return CUATask(
+            id=task_id,
+            name=task_metadata.get("name", task_id),
+            description=task_description,
+            difficulty=TaskDifficulty.MEDIUM,
+            category=TaskCategory.SYSTEM,
+            max_steps=task_metadata.get("max_steps", self.max_turns),
+            validation_query=task_metadata.get("validation_query"),
+            expected_result=task_metadata.get("expected_result"),
+        )
+    
+    async def _run_env_rollout(self, sample: dict) -> dict:
+        """运行环境 rollout：actor 驱动的多轮交互。
+        
+        Args:
+            sample: 输入 sample
+            
+        Returns:
+            更新后的 sample，包含 reward 和执行信息
+        """
+        task = self._build_task(sample)
+        env_config = self._build_env_config()
+        rollout_id = f"{task.id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        
+        self._logger.info(f"[CUAEnvRollout] Starting task: {task.id}, rollout: {rollout_id}")
+        
+        # 创建 vLLM 客户端（指向 AReaL 管理的 vLLM）
+        vllm_client = AsyncOpenAI(
+            base_url=self.vllm_api_base,
+            api_key="not-needed",  # vLLM 不需要 API key
+        )
+        
+        # 确定模型名称
+        model_name = self.model_name
+        if not model_name:
+            # 尝试从 vLLM 获取
+            try:
+                models = await vllm_client.models.list()
+                if models.data:
+                    model_name = models.data[0].id
+            except Exception:
+                model_name = "default"
+        
+        env = GBoxActorEnv(env_config, task, rollout_id)
+        
+        try:
+            # 重置环境，获取初始 observation
+            obs = await env.reset()
+            messages = obs["messages"]
+            tools = obs["tools"]
+            done = obs["done"]
+            
+            # 多轮交互循环
+            while not done:
+                # 调用 vLLM 生成 tool_call
+                try:
+                    # 首先尝试使用 tools 参数（需要 vLLM 支持工具调用）
+                    try:
+                        response = await vllm_client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            tools=tools,
+                            tool_choice="auto",
+                            max_tokens=1024,
+                            temperature=0.7,
+                        )
+                        use_tool_calls = True
+                    except Exception as tool_error:
+                        # 如果 vLLM 不支持工具调用，使用普通模式并解析 JSON
+                        self._logger.warning(
+                            f"[Turn {env.num_turns + 1}] vLLM tool calling failed: {tool_error}, "
+                            "falling back to JSON parsing mode"
+                        )
+                        response = await vllm_client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            max_tokens=1024,
+                            temperature=0.7,
+                        )
+                        use_tool_calls = False
+                    
+                    choice = response.choices[0]
+                    
+                    # 检查是否有 tool_call
+                    if use_tool_calls and choice.message.tool_calls:
+                        tool_call = choice.message.tool_calls[0]
+                        tool_call_dict = {
+                            "id": tool_call.id,
+                            "function": {
+                                "name": tool_call.function.name,
+                                "arguments": tool_call.function.arguments,
+                            },
+                        }
+                        
+                        self._logger.info(
+                            f"[Turn {env.num_turns + 1}] vLLM generated tool_call: "
+                            f"{tool_call.function.name}"
+                        )
+                    else:
+                        # 尝试从文本内容中解析 JSON 格式的动作
+                        content = choice.message.content or ""
+                        tool_call_dict = self._parse_action_from_text(content, env.num_turns + 1)
+                    
+                    # 执行环境步骤
+                    obs, reward, done, info = await env.step(tool_call_dict)
+                    
+                    if not done:
+                        messages = obs["messages"]
+                        tools = obs["tools"]
+                        
+                except Exception as e:
+                    self._logger.error(f"[Turn {env.num_turns + 1}] vLLM call failed: {e}")
+                    # 强制结束
+                    done = True
+                    info = {
+                        "task_completed": False,
+                        "task_success": False,
+                        "error": str(e),
+                        "num_turns": env.num_turns,
+                        "errors": env.errors + [str(e)],
+                    }
+                    reward = 0.0
+            
+            # 计算终局奖励
+            final_reward = await env.compute_reward()
+            
+            # 更新 sample
+            sample["task_completed"] = info.get("task_completed", False)
+            sample["task_success"] = info.get("task_success", False)
+            sample["num_turns"] = info.get("num_turns", env.num_turns)
+            sample["max_turns"] = self.max_turns
+            sample["errors"] = info.get("errors", env.errors)
+            sample["reward"] = final_reward
+            sample["completion"] = info.get("result_message", "")
+            
+            self._logger.info(
+                f"[CUAEnvRollout] Task {task.id} completed: "
+                f"success={sample['task_success']}, turns={sample['num_turns']}, "
+                f"reward={final_reward}"
+            )
+            
+        except Exception as e:
+            self._logger.error(f"[CUAEnvRollout] Task {task.id} failed: {e}", exc_info=True)
+            sample["task_completed"] = False
+            sample["task_success"] = False
+            sample["num_turns"] = env.num_turns if env else 0
+            sample["max_turns"] = self.max_turns
+            sample["errors"] = [str(e)]
+            sample["reward"] = 0.0
+            sample["completion"] = ""
+            
+        finally:
+            await env.close()
+        
+        return sample
+    
+    def __call__(self, sample, **kwargs):
+        """执行 workflow。
+        
+        如果有 GBOX_API_KEY，则运行环境 rollout；否则回退到文本 workflow。
+        """
+        if not self.gbox_api_key:
+            return super().__call__(sample, **kwargs)
+        
+        # 运行环境 rollout
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        sample = loop.run_until_complete(self._run_env_rollout(sample))
+        
+        return sample
 
 
 def main(args):
@@ -239,24 +544,16 @@ def main(args):
     local_rank = int(os.getenv("LOCAL_RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     
-    # Explicit device assignment following standard distributed training pattern
-    # Core principle: single GPU is a subset of distributed, not a special case
-    # This ensures code works for both single GPU and multi-GPU without branches
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
         
-        # Standard distributed pattern: assign GPU based on local_rank
-        # For single GPU (num_gpus=1), all processes use device 0
-        # For multi-GPU, each process gets a unique GPU
         if num_gpus == 1:
             device_id = 0
         else:
-            # Multi-GPU: use local_rank to assign unique GPUs
             device_id = local_rank % num_gpus
         
         torch.cuda.set_device(device_id)
         
-        # Only print from rank 0 to avoid log spam
         if rank == 0:
             print(f"[Rank {rank}] CUDA device assignment: device_id={device_id}, "
                   f"local_rank={local_rank}, world_size={world_size}, num_gpus={num_gpus}")
@@ -272,8 +569,6 @@ def main(args):
     actor = FSDPPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
     
-    # Check actual world_size after process group creation
-    # This ensures we use the correct weight update mode based on actual distributed setup
     actual_world_size = dist.get_world_size() if dist.is_initialized() else 1
     actual_rank = dist.get_rank() if dist.is_initialized() else 0
     
@@ -311,45 +606,29 @@ def main(args):
     rollout = RemotevLLMEngine(config.rollout)
     eval_rollout = RemotevLLMEngine(deepcopy(config.rollout))
     rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size)
-    # NOTE: eval does not have any offpolicyness control
     eval_rollout.config.max_head_offpolicyness = int(1e12)
     eval_rollout.initialize()
 
-    # Core principle: world_size=1 should use local update, not distributed
-    # This makes the code work for both single GPU and multi-GPU without code branches
-    # 
-    # If world_size == 1 OR only one GPU is visible, force disk mode to avoid NCCL collective operations
-    # This is the standard distributed training pattern: single GPU is a subset of distributed
+    # Determine weight update mode
     effective_world_size = actual_world_size if dist.is_initialized() else 1
     effective_dp_size = actor.data_parallel_world_size if hasattr(actor, 'data_parallel_world_size') else 1
     num_visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     
-    # Determine weight update mode based on actual distributed setup
-    # Key check: if only one GPU is visible, we must use disk mode to avoid duplicate GPU errors
-    # Even if AReaL launcher creates multiple ranks, they'll all map to the same GPU
     if effective_world_size == 1 or effective_dp_size == 1 or num_visible_gpus == 1:
-        # Single GPU / single process: use disk mode (local update)
-        # This avoids NCCL operations that would fail with duplicate GPU detection
         if actual_rank == 0:
-            print(f"[Rank {actual_rank}] Single GPU mode detected "
-                  f"(world_size={effective_world_size}, dp_size={effective_dp_size}, "
-                  f"visible_gpus={num_visible_gpus}), using 'disk' mode for weight updates")
+            print(f"[Rank {actual_rank}] Single GPU mode detected, using 'disk' mode for weight updates")
         weight_update_mode = "disk"
     else:
-        # Multi-GPU: use configured mode (xccl for distributed, disk for local)
         weight_update_mode = config.actor.weight_update_mode
         if actual_rank == 0:
-            print(f"[Rank {actual_rank}] Multi-GPU mode detected "
-                  f"(world_size={effective_world_size}, dp_size={effective_dp_size}, "
-                  f"visible_gpus={num_visible_gpus}), using '{weight_update_mode}' mode for weight updates")
+            print(f"[Rank {actual_rank}] Multi-GPU mode detected, using '{weight_update_mode}' mode")
     
-    # Create weight update metadata based on determined mode
     if weight_update_mode == "xccl":
         weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(
             allocation_mode,
             use_lora=config.actor.use_lora,
             lora_name=getattr(config.gconfig, "lora_name", None),
-            lora_int_id=1,  # hard coded for the single lora example
+            lora_int_id=1,
             base_model_name=config.actor.path,
         )
     elif weight_update_mode == "disk":
@@ -359,13 +638,11 @@ def main(args):
             config.saver.fileroot,
             use_lora=config.actor.use_lora,
             lora_name=getattr(config.gconfig, "lora_name", None),
-            lora_int_id=1,  # hard coded for the single lora example
+            lora_int_id=1,
             base_model_name=config.actor.path,
         )
     else:
-        raise ValueError(
-            f"Invalid weight_update_mode: {weight_update_mode}. Expected 'xccl' or 'disk'."
-        )
+        raise ValueError(f"Invalid weight_update_mode: {weight_update_mode}")
 
     actor.initialize(None, ft_spec)
     actor.connect_engine(rollout, weight_update_meta)
@@ -376,33 +653,40 @@ def main(args):
         ref.create_process_group(parallel_strategy=parallel_strategy)
         ref.initialize(None, ft_spec)
 
-    # Create rollout workflow
+    # Create rollout workflow - 使用新的环境驱动 workflow
     if tokenizer.pad_token_id not in config.gconfig.stop_token_ids:
         config.gconfig.stop_token_ids.append(tokenizer.pad_token_id)
     if tokenizer.eos_token_id not in config.gconfig.stop_token_ids:
         config.gconfig.stop_token_ids.append(tokenizer.eos_token_id)
     
-    workflow = RLVRWorkflow(
+    # Trace 目录
+    trace_dir = os.path.join(
+        StatsLogger.get_log_path(config.stats_logger), "trace"
+    )
+    
+    workflow = CUAEnvRolloutWorkflow(
         reward_fn=cua_reward_fn,
         gconfig=config.gconfig,
         tokenizer=tokenizer,
         enable_thinking=False,
+        trace_dir=trace_dir,
         dump_dir=os.path.join(
             StatsLogger.get_log_path(config.stats_logger), "generated"
         ),
     )
-    eval_workflow = RLVRWorkflow(
+    eval_workflow = CUAEnvRolloutWorkflow(
         reward_fn=cua_reward_fn,
         gconfig=config.gconfig.new(temperature=0.6),
         tokenizer=tokenizer,
         enable_thinking=False,
+        trace_dir=os.path.join(trace_dir, "eval"),
         rollout_stat_scope="eval-rollout",
         dump_dir=os.path.join(
             StatsLogger.get_log_path(config.stats_logger), "generated-eval"
         ),
     )
 
-    # Run training.
+    # Run training
     saver = Saver(config.saver, ft_spec)
     stats_logger = StatsLogger(config, ft_spec)
     evaluator = Evaluator(config.evaluator, ft_spec)
@@ -426,6 +710,18 @@ def main(args):
     total_epochs = config.total_train_epochs
     steps_per_epoch = len(train_dataloader)
     max_steps = total_epochs * steps_per_epoch
+
+    if actual_rank == 0:
+        print(f"\n{'='*60}")
+        print(f"CUA GRPO Training - Actor Driven Environment")
+        print(f"{'='*60}")
+        print(f"  vLLM API: http://localhost:8000/v1 (AReaL managed)")
+        print(f"  GBox API Key: {'***' + os.getenv('GBOX_API_KEY', '')[-4:] if os.getenv('GBOX_API_KEY') else 'NOT SET'}")
+        print(f"  Max Turns: {int(os.getenv('CUA_MAX_TURNS', '15'))}")
+        print(f"  Context Window: {int(os.getenv('CUA_CONTEXT_WINDOW', '5'))}")
+        print(f"  Trace Dir: {trace_dir}")
+        print(f"  Total Steps: {max_steps}")
+        print(f"{'='*60}\n")
 
     for global_step in range(start_step, max_steps):
         epoch = global_step // steps_per_epoch
@@ -468,7 +764,6 @@ def main(args):
             actor.step_lr_scheduler()
             log_gpu_stats("ppo update")
 
-        # pause inference for updating weights, save, and evaluation
         rollout.pause()
 
         with stats_tracker.record_timing("update_weights"):
@@ -517,14 +812,12 @@ def main(args):
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
-        # Upload statistics to the logger (e.g., wandb)
         stats = actor.export_stats()
         stats_logger.commit(epoch, step, global_step, stats)
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
-        # Resume rollout
         rollout.resume()
 
     stats_logger.close()

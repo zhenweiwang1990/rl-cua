@@ -116,6 +116,9 @@ vllm:
   enforce_eager: true
   # 禁用 sliding window 与 rope_scaling 不兼容，必须设为 false
   disable_sliding_window: false
+  # 工具调用支持（如果 AReaL 支持传递这些参数）
+  enable_auto_tool_choice: true
+  tool_call_parser: hermes
 
 # datasets
 train_dataset:

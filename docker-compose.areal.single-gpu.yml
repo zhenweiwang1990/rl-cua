@@ -29,18 +29,30 @@ services:
       - ./outputs:/workspace/outputs
     
     environment:
+      # GBox API（必需）
       - GBOX_API_KEY=${GBOX_API_KEY}
+      - GBOX_MODEL=${GBOX_MODEL:-gbox-handy-1}
+      
+      # HuggingFace / Wandb
       - HF_TOKEN=${HF_TOKEN:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
+      
+      # 训练配置
       - CONFIG_FILE=${CONFIG_FILE:-configs/cua_grpo_single_gpu.yaml}
-      # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
-      # 单 GPU 训练环境变量
+      
+      # CUA Agent 配置
+      - CUA_MAX_TURNS=${CUA_MAX_TURNS:-15}
+      - CUA_CONTEXT_WINDOW=${CUA_CONTEXT_WINDOW:-5}
+      
+      # CUDA 配置
       - CUDA_VISIBLE_DEVICES=0
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - NCCL_DEBUG=INFO
-      # PyTorch 内存优化：使用可扩展段减少内存碎片
+      
+      # PyTorch 内存优化
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-      # 确保单进程模式（如果 AReaL 支持）
+      
+      # 分布式训练
       - MASTER_ADDR=localhost
       - MASTER_PORT=29500
     
