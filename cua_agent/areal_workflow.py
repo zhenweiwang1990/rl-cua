@@ -302,35 +302,97 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         # Use agent-reported success
         return 1.0 if task_success else 0.0
 
+    def _compute_turn_reward(
+        self,
+        turn: int,
+        action_type: str,
+        action_result: dict,
+        task: CUATask,
+        done: bool,
+        is_success: bool,
+    ) -> float:
+        """Compute process reward for a single turn.
+        
+        This is a placeholder for Process Reward Model (PRM) integration.
+        Currently returns 0 for intermediate turns (final reward assigned at episode end).
+        
+        Future improvements:
+        1. Integrate a trained PRM that evaluates action quality
+        2. Use heuristics based on action type and result
+        3. Add progress estimation towards task goal
+        
+        Args:
+            turn: Current turn number
+            action_type: Type of action taken (tap, swipe, etc.)
+            action_result: Result of action execution
+            task: The task being executed
+            done: Whether the episode is complete
+            is_success: Whether the task was completed successfully
+            
+        Returns:
+            Process reward for this turn (0.0 by default, customize for PRM)
+        """
+        # === PLACEHOLDER: Replace with actual PRM when available ===
+        
+        # Option 1: Zero intermediate rewards (current behavior)
+        # All credit assigned at episode end via final_reward
+        if not done:
+            return 0.0
+        
+        # Option 2 (example): Simple heuristic-based rewards
+        # Uncomment and customize as needed:
+        #
+        # # Reward for successful action execution
+        # if action_result.get("status") == "success":
+        #     base_reward = 0.05
+        # else:
+        #     base_reward = -0.02  # Small penalty for failed actions
+        #
+        # # Bonus for task-relevant actions
+        # task_keywords = task.description.lower().split()
+        # if any(kw in action_type.lower() for kw in ["tap", "click"]):
+        #     if any(kw in str(action_result).lower() for kw in task_keywords):
+        #         base_reward += 0.1  # Bonus for relevant action
+        #
+        # return base_reward
+        
+        # Option 3 (future): Call external PRM API
+        # return self.process_reward_model.score(
+        #     task=task,
+        #     turn=turn,
+        #     action_type=action_type,
+        #     action_result=action_result,
+        # )
+        
+        return 0.0
+
     async def arun_episode(
         self,
         engine: InferenceEngine,
         data: dict[str, Any],
     ) -> dict[str, torch.Tensor]:
-        """Run a complete CUA episode with multi-turn environment interaction.
+        """Run n_samples independent CUA episodes for the same task.
 
         This is the main entry point called by AReaL training loop.
+        For GRPO, we run n_samples parallel episodes to enable group-wise comparison.
         """
         if not self.gbox_api_key:
             logger.warning("No GBOX_API_KEY, returning empty result")
             return self._empty_result()
 
-        # Build task
+        # Get n_samples from gconfig
+        n_samples = getattr(self.gconfig, 'n_samples', 1) or 1
+        
+        # Build task once (shared across all samples)
         task = self._build_task(data)
         
-        # Get training context information
-        # Try to get version from engine (usually corresponds to training step)
+        # Extract training context for rollout_id generation
         try:
             version = engine.get_version()
-            version_str = f"v{version:04d}"
         except Exception:
-            version_str = "v0000"
+            version = 0
         
-        # Increment rollout counter (per workflow instance)
-        self._rollout_counter += 1
-        
-        # Try to extract group/rollout info from data if available
-        # AReaL may pass this in metadata
+        # Extract metadata
         task_metadata = data.get("task_metadata", {})
         if isinstance(task_metadata, str):
             try:
@@ -338,29 +400,98 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             except json.JSONDecodeError:
                 task_metadata = {}
         
-        group_id = task_metadata.get("group_id", self._group_counter)
-        rollout_idx = task_metadata.get("rollout_idx", self._rollout_counter)
-        epoch = task_metadata.get("epoch", None)
-        global_step = task_metadata.get("global_step", None)
+        training_context = {
+            "version": version,
+            "epoch": task_metadata.get("epoch"),
+            "global_step": task_metadata.get("global_step"),
+            "group_id": task_metadata.get("group_id", self._group_counter),
+        }
+        
+        # Increment group counter for next task
+        self._group_counter += 1
+        
+        if n_samples == 1:
+            # Single episode - run directly
+            return await self._run_single_episode(engine, task, sample_idx=0, training_context=training_context)
+        
+        # Run n_samples independent episodes in parallel
+        logger.info(f"[GRPO] Running {n_samples} parallel episodes for task {task.id}")
+        
+        # Create tasks for parallel execution
+        episode_tasks = [
+            self._run_single_episode(engine, task, sample_idx=i, training_context=training_context)
+            for i in range(n_samples)
+        ]
+        
+        # Run all episodes in parallel
+        episode_results = await asyncio.gather(*episode_tasks, return_exceptions=True)
+        
+        # Collect successful results
+        valid_results = []
+        for i, result in enumerate(episode_results):
+            if isinstance(result, Exception):
+                logger.warning(f"[GRPO] Episode {i} for task {task.id} failed: {result}")
+                # Add empty result to maintain batch size
+                valid_results.append(self._empty_result())
+            elif result is not None and "input_ids" in result and result["input_ids"].numel() > 0:
+                valid_results.append(result)
+            else:
+                logger.warning(f"[GRPO] Episode {i} for task {task.id} returned empty result")
+                valid_results.append(self._empty_result())
+        
+        # Concatenate all episode results
+        if not valid_results:
+            return self._empty_result()
+        
+        # Filter out truly empty results for concatenation
+        non_empty_results = [r for r in valid_results if r["input_ids"].numel() > 0]
+        if not non_empty_results:
+            return self._empty_result()
+        
+        return concat_padded_tensors(non_empty_results)
+
+    async def _run_single_episode(
+        self,
+        engine: InferenceEngine,
+        task: CUATask,
+        sample_idx: int = 0,
+        training_context: dict | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Run a single CUA episode with multi-turn environment interaction.
+        
+        Args:
+            engine: AReaL inference engine
+            task: The CUA task to execute
+            sample_idx: Index of this sample (for GRPO grouping)
+            training_context: Training context info (version, epoch, global_step, etc.)
+            
+        Returns:
+            Training tensors for this episode
+        """
+        training_context = training_context or {}
         
         # Build comprehensive rollout_id with training context
         # Format: task_id_step{step}_g{group}_r{rollout}_{timestamp}
         # This ensures unique IDs and prevents overwriting of logs/traces
         parts = [task.id]
         
-        # Use global_step if available, otherwise use engine version
+        # Add global_step or version
+        global_step = training_context.get("global_step")
+        version = training_context.get("version", 0)
         if global_step is not None:
             parts.append(f"s{global_step:05d}")
-        elif version_str != "v0000":
-            parts.append(version_str)
+        elif version > 0:
+            parts.append(f"v{version:04d}")
         
         # Add epoch if available
+        epoch = training_context.get("epoch")
         if epoch is not None:
             parts.append(f"e{epoch:03d}")
         
-        # Add group and rollout indices
+        # Add group and sample indices
+        group_id = training_context.get("group_id", 0)
         parts.append(f"g{group_id:02d}")
-        parts.append(f"r{rollout_idx:03d}")
+        parts.append(f"r{sample_idx:02d}")
         
         # Add timestamp for additional uniqueness (milliseconds precision)
         parts.append(datetime.now().strftime("%H%M%S_%f")[:-3])
@@ -378,7 +509,7 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             provider="areal",
         )
 
-        # Create GBox client
+        # Create GBox client - each episode gets its own environment
         gbox = GBoxClient(
             api_key=self.gbox_api_key,
             model=self.gbox_model,
@@ -395,8 +526,13 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             context_window=self.context_window,
         )
 
-        # Track all responses and rewards for training
-        all_results = []
+        # Track episode-level data for training
+        # Instead of per-turn results, we accumulate all output tokens into one episode
+        episode_output_tokens = []  # All output tokens across turns
+        episode_output_logprobs = []  # Corresponding logprobs
+        episode_output_versions = []  # Version tracking
+        episode_turn_rewards = []  # Per-turn process rewards (for future PRM support)
+        episode_token_boundaries = []  # Track where each turn's tokens start/end
         turn_history = []
         task_success = False
         version = 0
@@ -582,25 +718,28 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
 
                 rollout_logger.end_turn()
 
-                # 8. Build result for this turn
-                seq = resp.input_tokens + resp.output_tokens
-                logprobs = [0.0] * resp.input_len + resp.output_logprobs
-                loss_mask = [0] * resp.input_len + [1] * resp.output_len
-                versions = [-1] * resp.input_len + resp.output_versions
-
-                result = {
-                    "input_ids": torch.tensor(seq, dtype=torch.int32).unsqueeze(0),
-                    "loss_mask": torch.tensor(loss_mask, dtype=torch.int32).unsqueeze(0),
-                    "logprobs": torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0),
-                    "versions": torch.tensor(versions, dtype=torch.int32).unsqueeze(0),
-                    "attention_mask": torch.ones(len(seq), dtype=torch.bool).unsqueeze(0),
-                    "rewards": torch.tensor([0.0], dtype=torch.float32),
-                }
-
-                if multi_modal_data and multi_modal_data.get("pixel_values") is not None:
-                    result["multi_modal_input"] = [multi_modal_data]
-
-                all_results.append(result)
+                # 8. Accumulate output tokens for episode-level GRPO
+                # Only keep model's output tokens (not prompt), so each episode = 1 sample
+                turn_start_idx = len(episode_output_tokens)
+                episode_output_tokens.extend(resp.output_tokens)
+                episode_output_logprobs.extend(resp.output_logprobs)
+                episode_output_versions.extend(resp.output_versions)
+                turn_end_idx = len(episode_output_tokens)
+                
+                # Track turn boundaries for process reward assignment
+                episode_token_boundaries.append((turn_start_idx, turn_end_idx))
+                
+                # Compute process reward for this turn (placeholder for PRM)
+                # TODO: Replace with actual Process Reward Model when available
+                turn_reward = self._compute_turn_reward(
+                    turn=turn,
+                    action_type=func_name,
+                    action_result=action_result,
+                    task=task,
+                    done=done,
+                    is_success=is_success,
+                )
+                episode_turn_rewards.append(turn_reward)
 
                 # 9. Update turn history for context window
                 assistant_msg = {
@@ -626,10 +765,6 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             # Compute final reward
             final_reward = await self._compute_final_reward(task, gbox, task_success)
 
-            # Update last result with reward
-            if all_results:
-                all_results[-1]["rewards"] = torch.tensor([final_reward], dtype=torch.float32)
-
             # Track stats
             stats_tracker.get(self.rollout_stat_scope).scalar(reward=final_reward)
 
@@ -645,10 +780,12 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         except Exception as e:
             rollout_logger.set_completion(reward=0.0, success=False, error=str(e))
             logger.error(f"[CUAEnvRollout] Task {task.id} failed: {e}", exc_info=True)
-            if not all_results:
+            if not episode_output_tokens:
                 # Print rollout log directly to stdout for visibility
                 self._print_rollout_summary(rollout_logger, task)
                 return self._empty_result()
+            # If we have some tokens, set final_reward to 0 and continue
+            final_reward = 0.0
 
         finally:
             # Cleanup
@@ -661,19 +798,65 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             self._print_rollout_summary(rollout_logger, task)
 
         # Dump traces if configured
-        if self.dump_dir and all_results:
+        if self.dump_dir and episode_output_tokens:
             await self._dump_trace(
                 version=version,
                 task_id=task.id,
                 turn_history=turn_history,
-                final_reward=final_reward if 'final_reward' in dir() else 0.0,
+                final_reward=final_reward if 'final_reward' in locals() else 0.0,
             )
 
-        # Concatenate all results
-        if not all_results:
+        # Build episode-level result (one sample per episode for GRPO)
+        if not episode_output_tokens:
             return self._empty_result()
 
-        return concat_padded_tensors(all_results)
+        episode_len = len(episode_output_tokens)
+        
+        # Build per-token rewards with process reward support
+        # Each token gets the reward of its corresponding turn
+        # Final reward is added to the last turn's tokens
+        token_rewards = torch.zeros(episode_len, dtype=torch.float32)
+        
+        for turn_idx, (start_idx, end_idx) in enumerate(episode_token_boundaries):
+            turn_reward = episode_turn_rewards[turn_idx] if turn_idx < len(episode_turn_rewards) else 0.0
+            
+            # Assign turn's process reward to all tokens in that turn
+            # (or just the last token of the turn - see option below)
+            if end_idx > start_idx:
+                # Option A: Assign to last token of turn only (recommended for credit assignment)
+                token_rewards[end_idx - 1] = turn_reward
+                
+                # Option B: Distribute across all tokens in turn (uncomment if preferred)
+                # token_rewards[start_idx:end_idx] = turn_reward / (end_idx - start_idx)
+        
+        # Add final outcome reward to the last token of the episode
+        # This is the main signal for episode-level success/failure
+        if episode_len > 0:
+            token_rewards[-1] += final_reward
+        
+        # Total episode reward for GRPO advantage computation
+        total_episode_reward = sum(episode_turn_rewards) + final_reward
+        
+        # Create single episode result with all output tokens
+        # This ensures each episode = 1 sample for GRPO group comparison
+        episode_result = {
+            # Only output tokens (no prompt) - each episode is one sample
+            "input_ids": torch.tensor(episode_output_tokens, dtype=torch.int32).unsqueeze(0),
+            # All output tokens contribute to loss
+            "loss_mask": torch.ones(episode_len, dtype=torch.int32).unsqueeze(0),
+            # Logprobs for all output tokens
+            "logprobs": torch.tensor(episode_output_logprobs, dtype=torch.float32).unsqueeze(0),
+            # Version tracking
+            "versions": torch.tensor(episode_output_versions, dtype=torch.int32).unsqueeze(0),
+            # Attention mask
+            "attention_mask": torch.ones(episode_len, dtype=torch.bool).unsqueeze(0),
+            # Per-token rewards (for dense reward training)
+            "token_rewards": token_rewards.unsqueeze(0),
+            # Total episode reward (for GRPO advantage normalization)
+            "rewards": torch.tensor([total_episode_reward], dtype=torch.float32),
+        }
+
+        return episode_result
 
     def _print_rollout_summary(self, rollout_logger: RolloutLogger, task: CUATask):
         """Print detailed rollout execution log to stdout.
