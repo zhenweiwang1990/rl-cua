@@ -26,6 +26,7 @@ from datetime import datetime
 
 import torch
 import torch.distributed as dist
+import numpy as np
 from datasets import Dataset
 from openai import AsyncOpenAI
 
@@ -361,6 +362,47 @@ def main(args):
         with stats_tracker.record_timing("compute_advantage"):
             actor.compute_advantages(batch)
             log_gpu_stats("compute advantages")
+            
+            # Log group-wise statistics for GRPO
+            if actual_rank == 0 and isinstance(batch, dict):
+                # Extract group information from batch
+                rewards = batch.get("reward", [])
+                advantages = batch.get("advantage", [])
+                
+                if rewards and len(rewards) > 0:
+                    group_size = actor.config.group_size
+                    num_groups = len(rewards) // group_size if group_size > 0 else 1
+                    
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"[GRPO Groups] Total samples: {len(rewards)}, Group size: {group_size}, Num groups: {num_groups}")
+                    
+                    # Log each group's statistics
+                    for group_idx in range(num_groups):
+                        start_idx = group_idx * group_size
+                        end_idx = start_idx + group_size
+                        group_rewards = rewards[start_idx:end_idx]
+                        group_advantages = advantages[start_idx:end_idx] if advantages and len(advantages) >= end_idx else []
+                        
+                        if group_rewards:
+                            mean_reward = float(np.mean(group_rewards))
+                            std_reward = float(np.std(group_rewards))
+                            min_reward = float(np.min(group_rewards))
+                            max_reward = float(np.max(group_rewards))
+                            
+                            logger.info(
+                                f"[GRPO Group {group_idx}] "
+                                f"Rewards: {[f'{r:.3f}' for r in group_rewards]} | "
+                                f"Mean: {mean_reward:.3f} | Std: {std_reward:.3f} | "
+                                f"Range: [{min_reward:.3f}, {max_reward:.3f}]"
+                            )
+                            
+                            if group_advantages:
+                                mean_adv = float(np.mean(group_advantages))
+                                logger.info(
+                                    f"[GRPO Group {group_idx}] "
+                                    f"Advantages: {[f'{a:.3f}' for a in group_advantages]} | "
+                                    f"Mean: {mean_adv:.3f}"
+                                )
 
         with (
             stats_tracker.record_timing("train_step"),
