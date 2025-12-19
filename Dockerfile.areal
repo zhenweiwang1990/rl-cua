@@ -4,27 +4,6 @@
 
 FROM ghcr.io/inclusionai/areal-runtime:v0.5.1
 
-# 确保 AReaL 已安装（如果基础镜像未包含或需要重新安装）
-# 首先检查 /AReaL 目录是否存在（基础镜像已包含源码），如果存在则从源码安装
-# 否则尝试从 PyPI 安装，如果失败则从 GitHub 安装
-RUN set -e; \
-    if [ -d "/AReaL" ] && ([ -f "/AReaL/pyproject.toml" ] || [ -f "/AReaL/setup.py" ]); then \
-        echo "Installing AReaL from /AReaL directory..."; \
-        uv pip install --no-build-isolation --system --no-cache-dir -e /AReaL; \
-    else \
-        echo "Attempting to install AReaL from PyPI..."; \
-        if uv pip install --no-build-isolation --system --no-cache-dir areal>=0.5.0 2>/dev/null; then \
-            echo "AReaL installed from PyPI"; \
-        else \
-            echo "PyPI installation failed, installing from GitHub..."; \
-            uv pip install --no-build-isolation --system --no-cache-dir git+https://github.com/inclusionAI/AReaL.git; \
-        fi; \
-    fi
-
-# 验证 AReaL 安装
-RUN python -c "import areal; print('AReaL installed successfully')" || \
-    (echo "ERROR: AReaL installation verification failed!" && exit 1)
-
 # 安装额外的依赖（如果 AReaL 未包含或需要特定版本）
 RUN uv pip install --no-build-isolation --system --no-cache-dir \
     safetensors>=0.4.5 \

@@ -14,243 +14,332 @@
     python train_areal.py --config configs/cua_grpo.yaml
 """
 
-import argparse
-import logging
 import os
 import sys
-from pathlib import Path
+import warnings
+from copy import deepcopy
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
-from peft import LoraConfig, get_peft_model
+import torch.distributed as dist
 
-# AReaL imports
-# 注意：这些导入可能需要根据实际 AReaL API 调整
-try:
-    from areal.trainer import GRPOTrainer
-    from areal.config import GRPOConfig
-    from areal.rollout import AsyncRolloutCollector
-except ImportError:
-    # 如果 AReaL 未安装，提供友好的错误信息
-    print("Error: AReaL is not installed. Please install it with:")
-    print("  pip install areal>=0.5.0")
-    print("  or")
-    print("  pip install git+https://github.com/inclusionAI/AReaL.git")
-    sys.exit(1)
+# AReaL imports - 使用官方 API
+from areal.api.alloc_mode import AllocationMode
+from areal.api.cli_args import GRPOConfig, load_expr_config
+from areal.api.io_struct import FinetuneSpec, StepInfo, WeightUpdateMeta
+from areal.dataset import get_custom_dataset
+from areal.engine.ppo.actor import FSDPPPOActor
+from areal.engine.vllm_remote import RemotevLLMEngine
+from areal.platforms import current_platform
+from areal.utils import seeding, stats_tracker
+from areal.utils.dataloader import create_dataloader
+from areal.utils.device import log_gpu_stats
+from areal.utils.evaluator import Evaluator
+from areal.utils.hf_utils import load_hf_tokenizer
+from areal.utils.recover import RecoverHandler
+from areal.utils.saver import Saver
+from areal.utils.stats_logger import StatsLogger
+from areal.workflow.rlvr import RLVRWorkflow
 
 # 项目 imports
-from cua_agent.areal_env import GBoxAReaLEnv, GBoxEnvConfig, create_env_factory
-from cua_agent.tasks import get_areal_train_dataset, get_areal_eval_dataset
+from cua_agent.reward import simple_reward_function, CUARolloutResult
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
-def load_model_and_tokenizer(config):
-    """使用标准 HuggingFace + PEFT 加载模型。
+def cua_reward_fn(completions, answer, prompt=None, prompt_ids=None, completion_ids=None, **kwargs):
+    """CUA 奖励函数，适配 AReaL 的奖励函数接口。
     
     Args:
-        config: AReaL 配置
+        completions: 模型生成的完成文本（字符串或列表）
+        answer: 期望的答案（任务数据）
+        prompt: 提示文本（可选）
+        prompt_ids: 提示 token IDs（可选）
+        completion_ids: 完成 token IDs（可选）
+        **kwargs: 其他参数（可能包含任务信息）
         
     Returns:
-        Tuple of (model, tokenizer)
+        奖励值（float）
     """
-    logger.info(f"Loading model: {config.model.name}")
+    # 如果 completions 是列表，取第一个
+    if isinstance(completions, list):
+        completion = completions[0] if completions else ""
+    else:
+        completion = completions
     
-    # 确定 dtype
-    torch_dtype = getattr(torch, config.model.torch_dtype, torch.bfloat16)
+    # 从 kwargs 中提取任务信息
+    task_id = kwargs.get("task_id", "")
+    task_completed = kwargs.get("task_completed", False)
+    task_success = kwargs.get("task_success", False)
+    num_turns = kwargs.get("num_turns", 0)
+    max_turns = kwargs.get("max_turns", 15)
+    errors = kwargs.get("errors", [])
     
-    # 加载 tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        config.model.name,
-        trust_remote_code=config.model.trust_remote_code,
+    # 构建 CUARolloutResult
+    rollout_result = CUARolloutResult(
+        task_id=task_id,
+        task_completed=task_completed,
+        task_success=task_success,
+        num_turns=num_turns,
+        max_turns=max_turns,
+        errors=errors,
     )
     
-    # 设置 padding
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    # 使用现有的奖励函数
+    # 注意：simple_reward_function 需要 task 对象，这里我们创建一个简单的任务对象
+    class SimpleTask:
+        def __init__(self, task_id, description):
+            self.id = task_id
+            self.description = description
     
-    # 加载模型（不使用 device_map，让 FSDP 处理）
-    model = AutoModelForCausalLM.from_pretrained(
-        config.model.name,
-        torch_dtype=torch_dtype,
-        trust_remote_code=config.model.trust_remote_code,
-        # 不使用 device_map，让 FSDP 自动处理
+    task = SimpleTask(
+        task_id=task_id,
+        description=answer if isinstance(answer, str) else str(answer)
     )
     
-    # 应用 LoRA（静态 LoRA）
-    if config.model.use_lora:
-        logger.info("Applying LoRA configuration")
-        
-        lora_config = LoraConfig(
-            r=config.model.lora.r,
-            lora_alpha=config.model.lora.alpha,
-            lora_dropout=config.model.lora.dropout,
-            target_modules=config.model.lora.target_modules,
-            bias=config.model.lora.bias,
-            task_type=config.model.lora.task_type,
-        )
-        
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-    
-    # 设置 pad_token_id
-    model.config.pad_token_id = tokenizer.pad_token_id
-    
-    logger.info("Model and tokenizer loaded successfully")
-    
-    return model, tokenizer
+    reward = simple_reward_function(rollout_result, task)
+    return reward
 
 
-def create_rollout_collector(config, tokenizer):
-    """创建 AReaL 异步 Rollout Collector。
-    
-    Args:
-        config: AReaL 配置
-        tokenizer: Tokenizer
-        
-    Returns:
-        AsyncRolloutCollector
-    """
-    # 创建环境配置
-    env_config = GBoxEnvConfig(
-        gbox_api_key=os.environ.get("GBOX_API_KEY", ""),
-        box_type=config.rollout.gbox.box_type,
-        timeout=config.rollout.gbox.timeout,
-        expires_in=config.rollout.gbox.expires_in,
-        action_delay=config.rollout.action_delay,
-        screenshot_delay=config.rollout.screenshot_delay,
-        max_turns=config.rollout.max_turns,
-    )
-    
-    # 创建环境工厂
-    env_factory = create_env_factory(env_config)
-    
-    # 创建 Rollout Collector
-    collector = AsyncRolloutCollector(
-        env_factory=env_factory,
-        tokenizer=tokenizer,
-        
-        # 异步配置
-        num_rollouts=config.rollout.num_rollouts,
-        concurrency=config.rollout.concurrency,
-        
-        # 可中断生成
-        interruptible=config.rollout.interruptible,
-        
-        # 数据陈旧度控制
-        max_staleness=config.rollout.max_staleness,
-        
-        # 推理配置
-        inference_backend=config.inference.backend,
-        inference_config={
-            "api_base": config.inference.vllm.api_base,
-            "max_tokens": config.inference.vllm.max_tokens,
-            "temperature": config.inference.vllm.temperature,
-            "top_p": config.inference.vllm.top_p,
-            "timeout": config.inference.vllm.timeout,
-        },
-        
-        # 温度变化
-        enable_temperature_variation=config.rollout.enable_temperature_variation,
-        base_temperature=config.rollout.base_temperature,
-        temperature_increment=config.rollout.temperature_increment,
-    )
-    
-    logger.info("Rollout collector created")
-    
-    return collector
-
-
-def main():
+def main(args):
     """主函数。"""
-    parser = argparse.ArgumentParser(description="AReaL GRPO Training for CUA Agent")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/cua_grpo.yaml",
-        help="Path to config file",
+    config, _ = load_expr_config(args, GRPOConfig)
+    config: GRPOConfig
+
+    rank = int(os.getenv("RANK", "0"))
+    tokenizer = load_hf_tokenizer(config.tokenizer_path)
+
+    seeding.set_random_seed(config.seed, key=f"trainer{rank}")
+    allocation_mode = AllocationMode.from_str(config.allocation_mode)
+    parallel_strategy = allocation_mode.train
+    assert parallel_strategy is not None
+
+    # Initialize train engine
+    actor = FSDPPPOActor(config=config.actor)
+    actor.create_process_group(parallel_strategy=parallel_strategy)
+
+    # Create dataset and dataloaders
+    train_dataset = get_custom_dataset(
+        split="train", dataset_config=config.train_dataset, tokenizer=tokenizer
     )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from latest checkpoint",
+    valid_dataset = get_custom_dataset(
+        split="test", dataset_config=config.valid_dataset, tokenizer=tokenizer
     )
-    parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        default=None,
-        help="Path to specific checkpoint to resume from",
+
+    train_dataloader = create_dataloader(
+        train_dataset,
+        rank=actor.data_parallel_rank,
+        world_size=actor.data_parallel_world_size,
+        dataset_config=config.train_dataset,
     )
-    args = parser.parse_args()
+    valid_dataloader = create_dataloader(
+        valid_dataset,
+        rank=actor.data_parallel_rank,
+        world_size=actor.data_parallel_world_size,
+        dataset_config=config.valid_dataset,
+    )
+    ft_spec = FinetuneSpec(
+        total_train_epochs=config.total_train_epochs,
+        dataset_size=len(train_dataloader) * config.train_dataset.batch_size,
+        train_batch_size=config.train_dataset.batch_size,
+    )
+
+    # Initialize inference engine
+    rollout = RemotevLLMEngine(config.rollout)
+    eval_rollout = RemotevLLMEngine(deepcopy(config.rollout))
+    rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size)
+    # NOTE: eval does not have any offpolicyness control
+    eval_rollout.config.max_head_offpolicyness = int(1e12)
+    eval_rollout.initialize()
+
+    if config.actor.weight_update_mode == "xccl":
+        weight_update_meta = WeightUpdateMeta.from_fsdp_xccl(
+            allocation_mode,
+            use_lora=config.actor.use_lora,
+            lora_name=getattr(config.gconfig, "lora_name", None),
+            lora_int_id=1,  # hard coded for the single lora example
+            base_model_name=config.actor.path,
+        )
+    elif config.actor.weight_update_mode == "disk":
+        weight_update_meta = WeightUpdateMeta.from_disk(
+            config.saver.experiment_name,
+            config.saver.trial_name,
+            config.saver.fileroot,
+            use_lora=config.actor.use_lora,
+            lora_name=getattr(config.gconfig, "lora_name", None),
+            lora_int_id=1,  # hard coded for the single lora example
+            base_model_name=config.actor.path,
+        )
+    else:
+        raise ValueError(
+            f"Invalid weight_update_mode: {config.actor.weight_update_mode}. Expected 'xccl' or 'disk'."
+        )
+
+    actor.initialize(None, ft_spec)
+    actor.connect_engine(rollout, weight_update_meta)
+
+    ref = None
+    if config.actor.kl_ctl > 0 and config.ref is not None:
+        ref = FSDPPPOActor(config=config.ref)
+        ref.create_process_group(parallel_strategy=parallel_strategy)
+        ref.initialize(None, ft_spec)
+
+    # Create rollout workflow
+    if tokenizer.pad_token_id not in config.gconfig.stop_token_ids:
+        config.gconfig.stop_token_ids.append(tokenizer.pad_token_id)
+    if tokenizer.eos_token_id not in config.gconfig.stop_token_ids:
+        config.gconfig.stop_token_ids.append(tokenizer.eos_token_id)
     
-    # 加载配置
-    logger.info(f"Loading config from: {args.config}")
-    config = GRPOConfig.from_yaml(args.config)
-    
-    # 处理 resume
-    if args.resume_from_checkpoint:
-        config.checkpoint.resume_from_checkpoint = args.resume_from_checkpoint
-    elif args.resume:
-        # AReaL 会自动查找最新 checkpoint
-        config.checkpoint.resume_from_checkpoint = "latest"
-    
-    # 打印配置
-    logger.info("=" * 60)
-    logger.info("CUA Agent AReaL GRPO Training")
-    logger.info("=" * 60)
-    logger.info(f"Model: {config.model.name}")
-    logger.info(f"LoRA: r={config.model.lora.r}, alpha={config.model.lora.alpha}")
-    logger.info(f"Learning rate: {config.training.learning_rate}")
-    logger.info(f"Batch size: {config.training.batch_size}")
-    logger.info(f"Max steps: {config.training.max_steps}")
-    logger.info(f"Rollouts per task: {config.rollout.num_rollouts}")
-    logger.info(f"Max turns: {config.rollout.max_turns}")
-    logger.info(f"Async mode: {config.rollout.async_mode}")
-    logger.info(f"Interruptible: {config.rollout.interruptible}")
-    logger.info(f"Max staleness: {config.rollout.max_staleness}")
-    logger.info(f"Output dir: {config.training.output_dir}")
-    logger.info("=" * 60)
-    
-    # 加载模型和 tokenizer
-    logger.info("Loading model and tokenizer...")
-    model, tokenizer = load_model_and_tokenizer(config)
-    
-    # 创建 Rollout Collector
-    logger.info("Creating rollout collector...")
-    rollout_collector = create_rollout_collector(config, tokenizer)
-    
-    # 加载任务数据集
-    logger.info("Loading task datasets...")
-    train_dataset = get_areal_train_dataset()
-    eval_dataset = get_areal_eval_dataset()
-    logger.info(f"Training tasks: {len(train_dataset)}")
-    logger.info(f"Evaluation tasks: {len(eval_dataset)}")
-    
-    # 创建 Trainer
-    logger.info("Creating GRPOTrainer...")
-    trainer = GRPOTrainer(
-        model=model,
+    workflow = RLVRWorkflow(
+        reward_fn=cua_reward_fn,
+        gconfig=config.gconfig,
         tokenizer=tokenizer,
-        config=config,
-        rollout_collector=rollout_collector,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        enable_thinking=False,
+        dump_dir=os.path.join(
+            StatsLogger.get_log_path(config.stats_logger), "generated"
+        ),
     )
-    
-    # 开始训练
-    logger.info("Starting training...")
-    trainer.train()
-    
-    # 完成
-    logger.info("Training complete!")
+    eval_workflow = RLVRWorkflow(
+        reward_fn=cua_reward_fn,
+        gconfig=config.gconfig.new(temperature=0.6),
+        tokenizer=tokenizer,
+        enable_thinking=False,
+        rollout_stat_scope="eval-rollout",
+        dump_dir=os.path.join(
+            StatsLogger.get_log_path(config.stats_logger), "generated-eval"
+        ),
+    )
+
+    # Run training.
+    saver = Saver(config.saver, ft_spec)
+    stats_logger = StatsLogger(config, ft_spec)
+    evaluator = Evaluator(config.evaluator, ft_spec)
+
+    recover_handler = RecoverHandler(config.recover, ft_spec)
+    recover_info = recover_handler.load(
+        actor,
+        saver,
+        evaluator,
+        stats_logger,
+        train_dataloader,
+        inference_engine=rollout,
+        weight_update_meta=weight_update_meta,
+    )
+    start_step = (
+        recover_info.last_step_info.next().global_step
+        if recover_info is not None
+        else 0
+    )
+
+    total_epochs = config.total_train_epochs
+    steps_per_epoch = len(train_dataloader)
+    max_steps = total_epochs * steps_per_epoch
+
+    for global_step in range(start_step, max_steps):
+        epoch = global_step // steps_per_epoch
+        step = global_step % steps_per_epoch
+        step_info = StepInfo(
+            global_step=global_step,
+            epoch=epoch,
+            epoch_step=step,
+            steps_per_epoch=steps_per_epoch,
+        )
+
+        with stats_tracker.record_timing("rollout"):
+            batch = actor.prepare_batch(
+                train_dataloader,
+                granularity=actor.config.group_size,
+                workflow=workflow,
+                should_accept_fn=lambda sample: True,
+            )
+
+        if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
+            with stats_tracker.record_timing("recompute_logp"):
+                logp = actor.compute_logp(batch)
+                batch["prox_logp"] = logp
+                log_gpu_stats("recompute logp")
+
+        if ref is not None:
+            with stats_tracker.record_timing("ref_logp"):
+                batch["ref_logp"] = ref.compute_logp(batch)
+                log_gpu_stats("ref logp")
+
+        with stats_tracker.record_timing("compute_advantage"):
+            actor.compute_advantages(batch)
+            log_gpu_stats("compute advantages")
+
+        with (
+            stats_tracker.record_timing("train_step"),
+            stats_tracker.scope("grpo_actor"),
+        ):
+            stats = actor.ppo_update(batch)
+            actor.step_lr_scheduler()
+            log_gpu_stats("ppo update")
+
+        # pause inference for updating weights, save, and evaluation
+        rollout.pause()
+
+        with stats_tracker.record_timing("update_weights"):
+            actor.update_weights(weight_update_meta)
+            actor.set_version(global_step + 1)
+            rollout.set_version(global_step + 1)
+            eval_rollout.set_version(global_step + 1)
+
+        with stats_tracker.record_timing("save"):
+            saver.save(actor, epoch, step, global_step, tokenizer=tokenizer)
+
+        with stats_tracker.record_timing("checkpoint_for_recover"):
+            recover_handler.dump(
+                actor,
+                step_info,
+                saver,
+                evaluator,
+                stats_logger,
+                train_dataloader,
+                tokenizer=tokenizer,
+            )
+
+        dist.barrier(device_ids=[actor.device.index])
+        current_platform.synchronize()
+
+        with stats_tracker.record_timing("eval"):
+
+            def evaluate_fn():
+                if actor.is_data_parallel_head():
+                    cnt = 0
+                    for data in valid_dataloader:
+                        for item in data:
+                            eval_rollout.submit(item, eval_workflow)
+                            cnt += 1
+                    eval_rollout.wait(cnt, timeout=None)
+                dist.barrier(device_ids=[actor.device.index])
+                current_platform.synchronize()
+
+            evaluator.evaluate(
+                evaluate_fn,
+                epoch,
+                step,
+                global_step,
+            )
+
+        dist.barrier(device_ids=[actor.device.index])
+        current_platform.synchronize()
+
+        # Upload statistics to the logger (e.g., wandb)
+        stats = actor.export_stats()
+        stats_logger.commit(epoch, step, global_step, stats)
+
+        dist.barrier(device_ids=[actor.device.index])
+        current_platform.synchronize()
+
+        # Resume rollout
+        rollout.resume()
+
+    stats_logger.close()
+    eval_rollout.destroy()
+    rollout.destroy()
+    if ref is not None:
+        ref.destroy()
+    actor.destroy()
 
 
 if __name__ == "__main__":
-    main()
-
+    main(sys.argv[1:])
