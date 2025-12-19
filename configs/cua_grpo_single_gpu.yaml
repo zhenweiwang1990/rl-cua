@@ -26,7 +26,7 @@ allocation_mode: vllm:d1p1t1+d1p1t1
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 8  # Should match or be multiple of n_samples for efficiency
+  max_concurrent_rollouts: 8 
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
@@ -35,10 +35,7 @@ rollout:
 
 gconfig:
   # n_samples: Number of samples per prompt for GRPO group-wise normalization
-  # IMPORTANT: batch_size must be divisible by n_samples (group_size)
-  # Setting to 1 avoids divisibility issues but reduces GRPO effectiveness
-  # For better GRPO: use n_samples=2 with batch_size=4 (or batch_size=2 with n_samples=1)
-  n_samples: 4  # Changed from 2 to 1 to avoid batch size divisibility issues
+  n_samples: 4  
   min_new_tokens: 0
   max_new_tokens: 1024
   greedy: false
@@ -126,7 +123,6 @@ vllm:
 
 # datasets
 # Note: batch_size must be divisible by group_size (gconfig.n_samples)
-# With group_size = 1 (n_samples = 1), any batch_size will work
 train_dataset:
   batch_size: 8
   shuffle: true
@@ -138,7 +134,7 @@ train_dataset:
   max_length: 8192
 
 valid_dataset:
-  batch_size: 2
+  batch_size: 8
   shuffle: false
   pin_memory: true
   num_workers: 2
