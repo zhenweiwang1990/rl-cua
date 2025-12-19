@@ -49,7 +49,8 @@ actor:
   gradient_checkpointing: true
   dtype: bfloat16
   mb_spec:
-    max_tokens_per_mb: 8192
+    # 降低 microbatch 大小以节省显存
+    max_tokens_per_mb: 4096
   optimizer:
     type: adam
     lr: 1.0e-5
@@ -94,18 +95,22 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    max_tokens_per_mb: 8192
+    # 降低 microbatch 大小以节省显存
+    max_tokens_per_mb: 4096
   optimizer: null
 
 # vLLM 配置（内置 vLLM 服务器，由 AReal 自动启动和管理）
 # 全参训练：vLLM 加载完整模型，直接接收全参权重更新
+# 注意：单 GPU 模式下，vLLM 和训练器共享显存，需要合理分配
 vllm:
   model: ${actor.path}
   seed: ${seed}
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_model_len: 8192
-  gpu_memory_utilization: 0.5
+  # 降低 vLLM 内存使用率，为训练器预留更多显存
+  # 0.35 = 约 49GB，训练器需要约 70-80GB（模型+优化器状态）
+  gpu_memory_utilization: 0.35
   # 全参训练：不使用 LoRA
   enable_lora: false
   enforce_eager: true
@@ -162,7 +167,7 @@ stats_logger:
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   wandb:
-    mode: enabled
+    mode: disabled
     project: cua-grpo-single-gpu
     entity: null
 

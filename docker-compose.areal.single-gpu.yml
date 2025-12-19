@@ -37,6 +37,8 @@ services:
       # 单 GPU 训练环境变量
       - CUDA_VISIBLE_DEVICES=0
       - NCCL_DEBUG=INFO
+      # PyTorch 内存优化：使用可扩展段减少内存碎片
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     
     # 注意：不再依赖独立的 vLLM 服务，vLLM 由 AReal 内置管理
     
