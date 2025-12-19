@@ -30,7 +30,6 @@ services:
     
     environment:
       - GBOX_API_KEY=${GBOX_API_KEY}
-      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
       - HF_TOKEN=${HF_TOKEN:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
@@ -43,7 +42,7 @@ services:
     command: >
       -m areal.launcher.local
       train_areal.py
-      --config configs/cua_grpo_single_gpu.yaml
+      --config /workspace/configs/cua_grpo_single_gpu.yaml
     
     restart: "no"
     
