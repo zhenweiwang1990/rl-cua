@@ -12,7 +12,7 @@ RUN uv pip install --no-build-isolation --system --no-cache-dir \
 
 # ============ 安装 GBox ============
 RUN uv pip install --no-build-isolation --system --no-cache-dir \
-    git+https://github.com/babelcloud/gbox-cua.git
+    git+https://github.com/babelcloud/gbox-cua.git@v0.0.2
 
 # ============ 复制项目代码 ============
 # 复制 rl-cua 项目代码到工作目录
