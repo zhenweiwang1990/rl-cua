@@ -23,8 +23,10 @@ COPY requirements-areal.txt .
 RUN pip install --no-cache-dir -r requirements-areal.txt
 
 # ============ 安装 AReaL ============
-# 从源码安装 AReaL
-RUN pip install --no-cache-dir git+https://github.com/inclusionAI/AReaL.git
+# 从源码安装 AReaL（使用 main 分支，可以改为特定 tag 或 commit）
+# 例如：git+https://github.com/inclusionAI/AReaL.git@v0.1.0
+# 或：git+https://github.com/inclusionAI/AReaL.git@<commit-hash>
+RUN pip install --no-cache-dir git+https://github.com/inclusionAI/AReaL.git@main
 
 # ============ 安装 GBox ============
 RUN pip install --no-cache-dir git+https://github.com/babelcloud/gbox-cua.git
