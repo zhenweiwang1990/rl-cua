@@ -1,9 +1,7 @@
 # Dockerfile.areal
 # AReaL GRPO 训练 Docker 镜像
 
-# 使用更新的 PyTorch 基础镜像
-# PyTorch 2.4.0+ 支持 CUDA 12.1+
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn8-devel
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
 # ============ 基础设置 ============
 ENV DEBIAN_FRONTEND=noninteractive
