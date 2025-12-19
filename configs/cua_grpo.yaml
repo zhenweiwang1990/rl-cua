@@ -1,146 +1,171 @@
 # configs/cua_grpo.yaml
 # CUA Agent GRPO 训练配置
+# 基于 AReal 官方示例格式: https://github.com/inclusionAI/AReaL/blob/main/examples/lora/gsm8k_grpo_lora_vllm.yaml
 
-# ============ Launcher 配置 ============
-launcher:
-  type: "local"  # 使用本地 launcher (areal.launcher.local)
+experiment_name: cua-grpo
+trial_name: trial0
 
-# ============ 模型配置 ============
-model:
-  name: "Qwen/Qwen3-VL-32B-Instruct"  # 使用官方模型名（非 unsloth）
-  max_seq_length: 16384
-  torch_dtype: "bfloat16"
-  trust_remote_code: true
-  
-  # LoRA 配置（静态 LoRA）
-  use_lora: true
-  lora:
-    r: 16
-    alpha: 32
-    dropout: 0.0
-    target_modules:
-      - "q_proj"
-      - "k_proj"
-      - "v_proj"
-      - "o_proj"
-      - "gate_proj"
-      - "up_proj"
-      - "down_proj"
-    bias: "none"
-    task_type: "CAUSAL_LM"
+seed: 42
+enable_offload: false
+total_train_epochs: 10
+tokenizer_path: ${actor.path}
 
-# ============ 训练配置 ============
-training:
-  # 基础参数
-  learning_rate: 1.0e-5
-  weight_decay: 0.01
-  max_grad_norm: 1.0
-  
-  # 批次配置
-  batch_size: 4  # 每 GPU 的任务数
-  gradient_accumulation_steps: 4
-  
-  # 训练进度
-  max_steps: 200
-  warmup_steps: 10
-  
-  # 评估和保存
-  eval_steps: 10
-  save_steps: 10
-  save_total_limit: 5
-  
-  # 最佳模型
-  load_best_model_at_end: true
-  metric_for_best_model: "eval/accuracy"
-  greater_is_better: true
-  
-  # 早停
-  early_stopping_patience: 5
-  target_accuracy: 0.90
-  
-  # 输出
-  output_dir: "outputs/grpo_cua"
-  seed: 42
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 8
+  fileroot: /workspace/outputs/grpo_cua
+  name_resolve:
+    type: nfs
+    nfs_record_root: /workspace/outputs/grpo_cua/name_resolve
 
-# ============ GRPO 算法配置 ============
-grpo:
-  beta: 0.01  # KL 惩罚系数
-  clip_epsilon: 0.2  # PPO clip 参数
-  min_group_std: 0.05  # 最小组标准差
-  advantage_normalization: true
+allocation_mode: vllm:d4p1t1+d4p1t1
 
-# ============ Rollout 配置 ============
 rollout:
-  # 基础参数
-  num_rollouts: 4  # 每个任务的 rollout 数量（GRPO 组大小）
-  max_turns: 15  # 每个 rollout 的最大回合数
-  
-  # 并发
-  concurrency: 4  # 并行 rollout 数量
-  
-  # 异步配置
-  async_mode: true
-  interruptible: true  # 可中断生成
-  
-  # 数据陈旧度控制
-  max_staleness: 5  # 最大允许陈旧度
-  
-  # 温度变化（用于探索）
-  enable_temperature_variation: true
-  base_temperature: 0.6
-  temperature_increment: 0.1
-  
-  # 环境配置
-  gbox:
-    box_type: "android"
-    timeout: "60s"
-    expires_in: "15m"
-  
-  # 延迟
-  action_delay: 0.5
-  screenshot_delay: 0.3
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  max_concurrent_rollouts: 256
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  enable_rollout_tracing: false
+  use_lora: true
 
-# ============ 推理配置 ============
-inference:
-  backend: "vllm"  # 或 "sglang"
-  
-  vllm:
-    api_base: "http://localhost:8000/v1"
-    max_tokens: 2048
-    temperature: 0.7
-    top_p: 0.9
-    timeout: 120.0
-    max_retries: 3
+gconfig:
+  n_samples: 4
+  min_new_tokens: 0
+  max_new_tokens: 2048
+  greedy: false
+  temperature: 0.7
+  lora_name: "lora-cua"
 
-# ============ 分布式训练配置 ============
-distributed:
-  backend: "fsdp"  # 使用 FSDP
-  
-  fsdp:
-    sharding_strategy: "FULL_SHARD"
-    mixed_precision: "bf16"
+actor:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3-VL-32B-Instruct
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  mb_spec:
+    max_tokens_per_mb: 16384
+  optimizer:
+    type: adam
+    lr: 1.0e-5
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: cosine
     gradient_clipping: 1.0
-    cpu_offload: false
-    
-  # 让 FSDP 自动处理设备分配
-  # 不需要手动指定 GPU
+    warmup_steps_proportion: 0.05
+  group_size: ${gconfig.n_samples}
+  eps_clip: 0.2
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.01
+  ppo_n_minibatches: 1
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behav_imp_weight_cap: 5.0
+  dynamic_sampling: false
+  reward_norm:
+    mean_level: group
+    std_level: group
+    group_size: ${gconfig.n_samples}
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  max_new_tokens: ${gconfig.max_new_tokens}
+  weight_update_mode: xccl
 
-# ============ 日志和监控 ============
-logging:
-  level: "INFO"
-  log_to_file: true
-  log_file: "outputs/grpo_cua/logs/training.log"
-  enable_detailed_logging: true
-  detailed_log_file: "outputs/grpo_cua/logs/rollouts.log"
+  # lora
+  use_lora: ${rollout.use_lora}
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 32
+  target_modules: [all-linear]
 
-monitoring:
-  enable_wandb: false
-  wandb_project: "cua-grpo"
-  wandb_entity: null  # 可选
-  enable_tensorboard: false
+ref:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 16384
+  optimizer: null
 
-# ============ Checkpoint 配置 ============
-checkpoint:
-  resume_from_checkpoint: null  # 或指定路径
-  ignore_data_skip: false
+# vLLM
+vllm:
+  model: ${actor.path}
+  seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_model_len: 16384
+  gpu_memory_utilization: 0.85
+  # lora
+  enable_lora: ${rollout.use_lora}
+  lora_modules: '{"name": "${gconfig.lora_name}", "path": "${actor.path}", "base_model_name": "${actor.path}"}'
+  enforce_eager: true
 
+# datasets
+train_dataset:
+  batch_size: 4
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: cua_agent.tasks:get_areal_train_dataset
+  type: rl
+  max_length: 16384
+
+valid_dataset:
+  batch_size: 4
+  shuffle: false
+  pin_memory: true
+  num_workers: 4
+  path: cua_agent.tasks:get_areal_eval_dataset
+  type: rl
+  max_length: 16384
+
+# Utilities
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 10
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 10
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled
+    project: cua-grpo
+    entity: null
+
+launcher:
+  inference_server_cpus_per_gpu: 4
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 4
+  trainer_mem_per_gpu: 32768
