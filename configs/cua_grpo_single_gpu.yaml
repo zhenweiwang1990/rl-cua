@@ -116,9 +116,9 @@ vllm:
   enforce_eager: true
   # 禁用 sliding window 与 rope_scaling 不兼容，必须设为 false
   disable_sliding_window: false
-  # 工具调用支持（如果 AReaL 支持传递这些参数）
-  enable_auto_tool_choice: true
-  tool_call_parser: hermes
+  # 注意：工具调用支持需要在 vLLM 启动时通过命令行参数传递
+  # AReaL 的 vLLMConfig 不支持 enable_auto_tool_choice 和 tool_call_parser
+  # 如果 vLLM 不支持原生 tool_calls，workflow 会自动回退到 JSON 解析模式
 
 # datasets
 train_dataset:

@@ -26,7 +26,7 @@ from cua_agent.tasks import (
 # AReaL environment
 from cua_agent.areal_env import (
     GBoxEnvConfig,
-    GBoxAReaLEnv,
+    GBoxActorEnv,
     create_env_factory,
 )
 
@@ -58,6 +58,6 @@ __all__ = [
     
     # AReaL Environment
     "GBoxEnvConfig",
-    "GBoxAReaLEnv",
+    "GBoxActorEnv",
     "create_env_factory",
 ]

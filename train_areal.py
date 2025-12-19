@@ -223,9 +223,31 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
         self.context_window = kwargs.pop("context_window", None) or int(os.getenv("CUA_CONTEXT_WINDOW", "5"))
         self.trace_dir = kwargs.pop("trace_dir", None)
         
-        # vLLM 端点：AReaL 内置 vLLM 默认在 localhost:8000 启动
-        # 不需要用户配置，AReaL 自动管理
-        self.vllm_api_base = "http://localhost:8000/v1"
+        # vLLM 端点：从 AReaL 环境变量获取
+        # 注意：AReaL 在启动时会设置 AREAL_LLM_SERVER_ADDRS 环境变量
+        # 格式为 "host:port" 或 "host1:port1,host2:port2"
+        areal_llm_addrs = os.getenv("AREAL_LLM_SERVER_ADDRS", "")
+        if areal_llm_addrs:
+            # 格式可能是 "host:port" 或 "host1:port1,host2:port2"，取第一个
+            first_addr = areal_llm_addrs.split(",")[0].strip()
+            if ":" in first_addr:
+                host, port = first_addr.rsplit(":", 1)
+                self.vllm_api_base = f"http://{host}:{port}/v1"
+            else:
+                self.vllm_api_base = f"http://{first_addr}/v1"
+        else:
+            # 如果环境变量不存在，尝试从 VLLM_API_BASE 获取（用户手动设置）
+            vllm_api_base = os.getenv("VLLM_API_BASE", "")
+            if vllm_api_base:
+                self.vllm_api_base = vllm_api_base if vllm_api_base.endswith("/v1") else f"{vllm_api_base}/v1"
+            else:
+                # 最后回退到默认值
+                self.vllm_api_base = "http://localhost:8000/v1"
+                self._logger.warning(
+                    "AREAL_LLM_SERVER_ADDRS not set, using default vLLM API base: "
+                    f"{self.vllm_api_base}. This may not work correctly."
+                )
+        
         self.model_name = kwargs.pop("model_name", None) or ""
         
         super().__init__(*args, **kwargs)
@@ -384,6 +406,7 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
         rollout_id = f"{task.id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         
         self._logger.info(f"[CUAEnvRollout] Starting task: {task.id}, rollout: {rollout_id}")
+        self._logger.info(f"[CUAEnvRollout] vLLM API base: {self.vllm_api_base}")
         
         # 创建 vLLM 客户端（指向 AReaL 管理的 vLLM）
         vllm_client = AsyncOpenAI(
@@ -712,10 +735,22 @@ def main(args):
     max_steps = total_epochs * steps_per_epoch
 
     if actual_rank == 0:
+        # 获取 vLLM 地址
+        areal_llm_addrs = os.getenv("AREAL_LLM_SERVER_ADDRS", "")
+        vllm_api_base = "N/A"
+        if areal_llm_addrs:
+            first_addr = areal_llm_addrs.split(",")[0].strip()
+            if ":" in first_addr:
+                host, port = first_addr.rsplit(":", 1)
+                vllm_api_base = f"http://{host}:{port}/v1"
+            else:
+                vllm_api_base = f"http://{first_addr}/v1"
+        
         print(f"\n{'='*60}")
         print(f"CUA GRPO Training - Actor Driven Environment")
         print(f"{'='*60}")
-        print(f"  vLLM API: http://localhost:8000/v1 (AReaL managed)")
+        print(f"  vLLM API: {vllm_api_base} (AReaL managed)")
+        print(f"  AREAL_LLM_SERVER_ADDRS: {areal_llm_addrs or 'NOT SET'}")
         print(f"  GBox API Key: {'***' + os.getenv('GBOX_API_KEY', '')[-4:] if os.getenv('GBOX_API_KEY') else 'NOT SET'}")
         print(f"  Max Turns: {int(os.getenv('CUA_MAX_TURNS', '15'))}")
         print(f"  Context Window: {int(os.getenv('CUA_CONTEXT_WINDOW', '5'))}")
