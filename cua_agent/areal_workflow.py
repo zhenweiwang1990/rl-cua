@@ -24,6 +24,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import aiofiles
@@ -113,6 +114,10 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         self.max_turns = kwargs.pop("max_turns", None) or int(os.getenv("CUA_MAX_TURNS", "15"))
         self.context_window = kwargs.pop("context_window", None) or int(os.getenv("CUA_CONTEXT_WINDOW", "5"))
         self.trace_dir = kwargs.pop("trace_dir", None)
+        
+        # Internal counters for tracking rollout context
+        self._rollout_counter = 0
+        self._group_counter = 0
 
         # Load tokenizer if path provided
         if isinstance(tokenizer, str):
@@ -312,7 +317,55 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
 
         # Build task
         task = self._build_task(data)
-        rollout_id = f"{task.id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        
+        # Get training context information
+        # Try to get version from engine (usually corresponds to training step)
+        try:
+            version = engine.get_version()
+            version_str = f"v{version:04d}"
+        except Exception:
+            version_str = "v0000"
+        
+        # Increment rollout counter (per workflow instance)
+        self._rollout_counter += 1
+        
+        # Try to extract group/rollout info from data if available
+        # AReaL may pass this in metadata
+        task_metadata = data.get("task_metadata", {})
+        if isinstance(task_metadata, str):
+            try:
+                task_metadata = json.loads(task_metadata) if task_metadata else {}
+            except json.JSONDecodeError:
+                task_metadata = {}
+        
+        group_id = task_metadata.get("group_id", self._group_counter)
+        rollout_idx = task_metadata.get("rollout_idx", self._rollout_counter)
+        epoch = task_metadata.get("epoch", None)
+        global_step = task_metadata.get("global_step", None)
+        
+        # Build comprehensive rollout_id with training context
+        # Format: task_id_step{step}_g{group}_r{rollout}_{timestamp}
+        # This ensures unique IDs and prevents overwriting of logs/traces
+        parts = [task.id]
+        
+        # Use global_step if available, otherwise use engine version
+        if global_step is not None:
+            parts.append(f"s{global_step:05d}")
+        elif version_str != "v0000":
+            parts.append(version_str)
+        
+        # Add epoch if available
+        if epoch is not None:
+            parts.append(f"e{epoch:03d}")
+        
+        # Add group and rollout indices
+        parts.append(f"g{group_id:02d}")
+        parts.append(f"r{rollout_idx:03d}")
+        
+        # Add timestamp for additional uniqueness (milliseconds precision)
+        parts.append(datetime.now().strftime("%H%M%S_%f")[:-3])
+        
+        rollout_id = "_".join(parts)
 
         # Initialize per-rollout logger (using gbox_cua.agent.RolloutLogger)
         rollout_logger = RolloutLogger(
@@ -365,6 +418,21 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
                 max_turns=self.max_turns,
             )
 
+            # Setup trace directory for saving screenshots
+            trace_path = None
+            if self.trace_dir:
+                trace_path = Path(self.trace_dir) / task.id / rollout_id
+                trace_path.mkdir(parents=True, exist_ok=True)
+                
+                # Save initial screenshot (turn 0)
+                try:
+                    initial_screenshot_bytes, _ = await gbox.take_screenshot()
+                    initial_screenshot_path = trace_path / "turn_0_initial.png"
+                    initial_screenshot_path.write_bytes(initial_screenshot_bytes)
+                    logger.info(f"Saved initial screenshot to {initial_screenshot_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save initial screenshot: {e}")
+
             # Main interaction loop
             for turn in range(1, self.max_turns + 1):
                 turn_log = rollout_logger.start_turn(turn, self.max_turns)
@@ -376,6 +444,14 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
                 turn_log.screenshot_time = (datetime.now() - screenshot_start).total_seconds()
                 turn_log.screenshot_bytes = len(screenshot_bytes)
                 turn_log.screenshot_size_kb = len(screenshot_bytes) / 1024
+
+                # Save screenshot to trace directory
+                if trace_path:
+                    try:
+                        screenshot_path = trace_path / f"turn_{turn}.png"
+                        screenshot_path.write_bytes(screenshot_bytes)
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Failed to save screenshot: {e}")
 
                 screenshot_b64 = f"data:image/png;base64,{base64.b64encode(screenshot_bytes).decode()}"
 
