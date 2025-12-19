@@ -36,9 +36,13 @@ services:
       # 注意：vLLM API 由 AReal 内置管理，不需要外部 VLLM_API_BASE
       # 单 GPU 训练环境变量
       - CUDA_VISIBLE_DEVICES=0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - NCCL_DEBUG=INFO
       # PyTorch 内存优化：使用可扩展段减少内存碎片
       - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # 确保单进程模式（如果 AReaL 支持）
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
     
     # 注意：不再依赖独立的 vLLM 服务，vLLM 由 AReal 内置管理
     

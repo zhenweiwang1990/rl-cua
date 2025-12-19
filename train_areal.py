@@ -19,6 +19,7 @@ import sys
 import warnings
 from copy import deepcopy
 
+import torch
 import torch.distributed as dist
 from datasets import Dataset
 
@@ -235,6 +236,22 @@ def main(args):
     config: GRPOConfig
 
     rank = int(os.getenv("RANK", "0"))
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    
+    # Explicit device assignment to prevent duplicate GPU usage
+    # Set CUDA device based on local rank to ensure each process uses a unique GPU
+    if torch.cuda.is_available():
+        # For single GPU setup, all processes should use device 0
+        # But we need to ensure only one process per GPU
+        if world_size == 1:
+            device_id = 0
+        else:
+            # For multi-GPU, use local_rank to assign unique GPUs
+            device_id = local_rank % torch.cuda.device_count()
+        torch.cuda.set_device(device_id)
+        print(f"[Rank {rank}] Using CUDA device {device_id} (local_rank={local_rank}, world_size={world_size})")
+    
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
     seeding.set_random_seed(config.seed, key=f"trainer{rank}")
