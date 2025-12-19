@@ -1,6 +1,11 @@
 # configs/cua_grpo_single_gpu.yaml
 # CUA Agent GRPO 训练配置 - 单 GPU (H200) 优化版
 
+# ============ Launcher 配置 ============
+launcher:
+  type: "local"  # 单 GPU 使用 local launcher
+  num_gpus: 1
+
 # ============ 模型配置 ============
 model:
   name: "Qwen/Qwen3-VL-8B-Instruct"  # 使用较小的模型（8B 适合单 GPU）

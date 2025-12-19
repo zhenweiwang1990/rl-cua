@@ -1,7 +1,7 @@
 # docker-compose.areal.single-gpu.yml
 # AReaL GRPO 训练 Docker Compose 配置 - 单 GPU (H200) 优化版
 
-version: '3.8'
+# version: '3.8'  # Docker Compose v2 不再需要 version 字段
 
 services:
   # ============ vLLM 推理服务 ============
@@ -25,7 +25,6 @@ services:
       - ./outputs:/workspace/outputs
     
     environment:
-      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
       - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
     
     # 单 GPU 配置：使用较小的 GPU 内存利用率，为训练留出空间

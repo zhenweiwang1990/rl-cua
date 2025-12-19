@@ -1,6 +1,11 @@
 # configs/cua_grpo.yaml
 # CUA Agent GRPO 训练配置
 
+# ============ Launcher 配置 ============
+launcher:
+  type: "local"  # 或 "ray" 用于多节点
+  num_gpus: null  # null 表示自动检测所有可用 GPU
+
 # ============ 模型配置 ============
 model:
   name: "Qwen/Qwen3-VL-32B-Instruct"  # 使用官方模型名（非 unsloth）

@@ -1,7 +1,7 @@
 # docker-compose.areal.yml
 # AReaL GRPO 训练 Docker Compose 配置
 
-version: '3.8'
+# version: '3.8'  # Docker Compose v2 不再需要 version 字段
 
 services:
   # ============ vLLM 推理服务 ============
