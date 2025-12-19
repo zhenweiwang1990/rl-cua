@@ -132,6 +132,7 @@ train_dataset:
   shuffle: true
   pin_memory: true
   num_workers: 2
+  drop_last: true  # Ensure all batches have the same size, divisible by group_size
   path: cua_agent.tasks:get_areal_train_dataset
   type: rl
   max_length: 8192

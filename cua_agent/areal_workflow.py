@@ -600,12 +600,11 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         return concat_padded_tensors(all_results)
 
     def _print_rollout_summary(self, rollout_logger: RolloutLogger, task: CUATask):
-        """Print a concise rollout summary to stdout.
+        """Print detailed rollout execution log to stdout.
         
         Uses print() directly to ensure visibility in Docker containers.
+        Prints both a summary line and detailed per-turn execution records.
         """
-        import sys
-        
         duration = rollout_logger.end_time - rollout_logger.start_time if rollout_logger.end_time else 0
         
         # Status indicators
@@ -617,7 +616,7 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             status_color = "\033[91m"  # Red
         reset = "\033[0m"
         
-        # Build summary line
+        # Print summary line
         summary_parts = [
             f"[Rollout] {task.id}",
             f"{status_color}{status}{reset}",
@@ -626,24 +625,129 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             f"Time: {duration:.1f}s",
             f"Tokens: {rollout_logger.total_model_tokens}",
         ]
-        
-        # Print summary
         print(" | ".join(summary_parts), flush=True)
+        print("", flush=True)  # Empty line for readability
         
-        # If there were errors, print them
-        if rollout_logger.errors:
-            for error in rollout_logger.errors[-3:]:  # Last 3 errors
-                print(f"  └─ Error: {error[:100]}", flush=True)
+        # Try to get detailed log using format_log() method
+        try:
+            detailed_log = rollout_logger.format_log()
+            if detailed_log:
+                # Print detailed log with indentation
+                for line in detailed_log.split('\n'):
+                    if line.strip():  # Skip empty lines
+                        print(f"  {line}", flush=True)
+                print("", flush=True)  # Empty line after detailed log
+        except (AttributeError, TypeError):
+            # If format_log() doesn't exist or fails, try manual formatting
+            try:
+                # Try to access turns attribute directly
+                if hasattr(rollout_logger, 'turns') and rollout_logger.turns:
+                    for turn_idx, turn_log in enumerate(rollout_logger.turns, 1):
+                        self._print_turn_details(turn_log, turn_idx)
+                    print("", flush=True)
+            except (AttributeError, TypeError):
+                # Fallback: try to get formatted log from format method
+                try:
+                    if hasattr(rollout_logger, 'format'):
+                        formatted = rollout_logger.format()
+                        if formatted:
+                            for line in formatted.split('\n'):
+                                if line.strip():
+                                    print(f"  {line}", flush=True)
+                            print("", flush=True)
+                except (AttributeError, TypeError):
+                    pass  # If all methods fail, just print summary
         
-        # Optionally print full log to file if dump_dir is configured
+        # Print errors if any
+        if hasattr(rollout_logger, 'errors') and rollout_logger.errors:
+            print(f"  Errors ({len(rollout_logger.errors)}):", flush=True)
+            for error in rollout_logger.errors[-5:]:  # Last 5 errors
+                error_msg = str(error)[:200]  # Truncate long errors
+                print(f"    └─ {error_msg}", flush=True)
+            print("", flush=True)
+        
+        # Optionally save full log to file if dump_dir is configured
         if self.dump_dir:
             try:
                 log_path = os.path.join(self.dump_dir, "rollout_logs", f"{task.id}.log")
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 with open(log_path, "w") as f:
-                    f.write(rollout_logger.format_log())
+                    try:
+                        f.write(rollout_logger.format_log())
+                    except (AttributeError, TypeError):
+                        # Fallback: write what we can
+                        f.write(f"Task: {task.id}\n")
+                        f.write(f"Success: {rollout_logger.final_success}\n")
+                        f.write(f"Reward: {rollout_logger.final_reward}\n")
+                        f.write(f"Turns: {rollout_logger.total_turns}/{rollout_logger.max_turns}\n")
             except Exception:
                 pass  # Silently ignore log file errors
+    
+    def _print_turn_details(self, turn_log, turn_idx: int):
+        """Print detailed information for a single turn."""
+        print(f"  Turn {turn_idx}:", flush=True)
+        
+        # Action information
+        if hasattr(turn_log, 'action_type') and turn_log.action_type:
+            action_params = ""
+            if hasattr(turn_log, 'action_params') and turn_log.action_params:
+                # Format parameters nicely
+                params_str = json.dumps(turn_log.action_params, ensure_ascii=False)
+                if len(params_str) > 100:
+                    params_str = params_str[:97] + "..."
+                action_params = f" ({params_str})"
+            print(f"    Action: {turn_log.action_type}{action_params}", flush=True)
+        
+        # Action result
+        if hasattr(turn_log, 'action_result') and turn_log.action_result:
+            result_status = "unknown"
+            result_msg = ""
+            if isinstance(turn_log.action_result, dict):
+                result_status = turn_log.action_result.get("status", "unknown")
+                result_msg = turn_log.action_result.get("message", "")
+            else:
+                result_status = str(turn_log.action_result)[:50]
+            
+            success_marker = "✓" if hasattr(turn_log, 'action_success') and turn_log.action_success else "✗"
+            print(f"    Result: {success_marker} {result_status}", flush=True)
+            if result_msg and len(result_msg) <= 150:
+                print(f"      {result_msg}", flush=True)
+        
+        # Thinking and content (if available)
+        if hasattr(turn_log, 'thinking') and turn_log.thinking:
+            thinking_preview = turn_log.thinking[:150] + "..." if len(turn_log.thinking) > 150 else turn_log.thinking
+            print(f"    Thinking: {thinking_preview}", flush=True)
+        
+        # Token usage
+        if hasattr(turn_log, 'total_tokens'):
+            tokens_info = f"Tokens: {turn_log.total_tokens}"
+            if hasattr(turn_log, 'prompt_tokens') and hasattr(turn_log, 'completion_tokens'):
+                tokens_info += f" (prompt: {turn_log.prompt_tokens}, completion: {turn_log.completion_tokens})"
+            print(f"    {tokens_info}", flush=True)
+        
+        # Timing information
+        timing_parts = []
+        if hasattr(turn_log, 'vlm_time') and turn_log.vlm_time:
+            timing_parts.append(f"VLM: {turn_log.vlm_time:.2f}s")
+        if hasattr(turn_log, 'action_time') and turn_log.action_time:
+            timing_parts.append(f"Action: {turn_log.action_time:.2f}s")
+        if hasattr(turn_log, 'screenshot_time') and turn_log.screenshot_time:
+            timing_parts.append(f"Screenshot: {turn_log.screenshot_time:.2f}s")
+        if timing_parts:
+            print(f"    Timing: {' | '.join(timing_parts)}", flush=True)
+        
+        # Task completion (if this turn completed the task)
+        if hasattr(turn_log, 'task_completed') and turn_log.task_completed:
+            success_msg = "successfully" if (hasattr(turn_log, 'task_success') and turn_log.task_success) else "unsuccessfully"
+            print(f"    Task completed {success_msg}", flush=True)
+            if hasattr(turn_log, 'task_message') and turn_log.task_message:
+                print(f"      {turn_log.task_message}", flush=True)
+        
+        # Errors
+        if hasattr(turn_log, 'action_error') and turn_log.action_error:
+            print(f"    Error: {turn_log.action_error[:150]}", flush=True)
+        
+        print("", flush=True)  # Empty line between turns
 
     def _empty_result(self) -> dict[str, torch.Tensor]:
         """Return empty result tensor dict."""
