@@ -1,11 +1,4 @@
 # AReaL GRPO Training Requirements
-# Updated: December 2024
-
-# AReaL 核心
-# 注意：AReaL 目前只能从 GitHub 源码安装，未发布到 PyPI
-# 在 Dockerfile 中单独安装，可以指定特定 commit 或分支：
-# pip install git+https://github.com/inclusionAI/AReaL.git@main
-# 或使用特定 commit: pip install git+https://github.com/inclusionAI/AReaL.git@<commit-hash>
 
 # HuggingFace 生态
 transformers>=4.50.0  # 支持 Qwen3-VL 需要 >=4.50.0
@@ -13,19 +6,10 @@ peft>=0.12.0  # 最新稳定版
 safetensors>=0.4.5
 datasets>=2.20.0
 
-# PyTorch 和分布式
-torch>=2.6.0  # 更新到较新稳定版（支持 CUDA 12.4+）
-torchvision>=0.19.0  # 与 torch 版本匹配
-# 不再需要 unsloth
-
-# 推理
-vllm>=0.10.0  # 更新到较新稳定版（2025年）
-
 # 其他依赖（更新到最新稳定版）
 Pillow>=10.4.0
 httpx>=0.27.0
 aiohttp>=3.11.0
-openai>=1.54.0  # OpenAI API 客户端
 pydantic>=2.9.0
 python-dotenv>=1.0.1
 tenacity>=9.0.0
