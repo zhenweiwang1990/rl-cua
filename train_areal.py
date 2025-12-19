@@ -81,9 +81,24 @@ def _get_cua_rl_dataset(
         if task_dict:
             result["answer"] = task_dict.get("description", "")
             result["task_id"] = item.get("id", "")
-            result["task_metadata"] = metadata
-            # 保存完整的 task 对象引用（用于 workflow）
-            result["_task_obj"] = task
+            # 将 task 的所有可序列化字段保存到 task_metadata 中
+            # 这样 workflow 可以重新构建 task 对象
+            task_metadata = metadata.copy() if metadata else {}
+            # 添加 task 的完整信息到 metadata（使用 task_dict 中的所有字段）
+            task_metadata.update({
+                "task_id": task_dict.get("id", item.get("id", "")),
+                "task_name": task_dict.get("name", ""),
+                "task_description": task_dict.get("description", ""),
+                "task_difficulty": task_dict.get("difficulty", "medium"),
+                "task_category": task_dict.get("category", "system"),
+                "max_steps": task_dict.get("max_steps", 15),
+                "validation_type": task_dict.get("validation_type", "state"),
+                "validation_query": task_dict.get("validation_query"),
+                "expected_result": task_dict.get("expected_result"),
+                "tags": task_dict.get("tags", []),
+                "prerequisites": task_dict.get("prerequisites", []),
+            })
+            result["task_metadata"] = task_metadata
         
         return result
     
@@ -372,21 +387,36 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
     
     def _build_task(self, sample: dict) -> CUATask:
         """从 sample 构建 CUATask。"""
-        # 尝试获取保存的 task 对象
-        task_obj = sample.get("_task_obj")
-        if task_obj and isinstance(task_obj, CUATask):
-            return task_obj
-        
-        task_id = sample.get("task_id", "") or f"task_{datetime.now().strftime('%H%M%S')}"
         task_metadata = sample.get("task_metadata", {}) or {}
-        task_description = sample.get("answer") or sample.get("messages", [{}])[0].get("content", "")
+        
+        # 从 task_metadata 中获取所有信息
+        task_id = task_metadata.get("task_id") or sample.get("task_id", "") or f"task_{datetime.now().strftime('%H%M%S')}"
+        task_name = task_metadata.get("task_name", task_id)
+        task_description = (
+            task_metadata.get("task_description") or 
+            sample.get("answer") or 
+            sample.get("messages", [{}])[0].get("content", "")
+        )
+        
+        # 解析 difficulty 和 category（可能是字符串）
+        difficulty_str = task_metadata.get("task_difficulty", "medium")
+        try:
+            difficulty = TaskDifficulty(difficulty_str)
+        except (ValueError, TypeError):
+            difficulty = TaskDifficulty.MEDIUM
+        
+        category_str = task_metadata.get("task_category", "system")
+        try:
+            category = TaskCategory(category_str)
+        except (ValueError, TypeError):
+            category = TaskCategory.SYSTEM
         
         return CUATask(
             id=task_id,
-            name=task_metadata.get("name", task_id),
+            name=task_name,
             description=task_description,
-            difficulty=TaskDifficulty.MEDIUM,
-            category=TaskCategory.SYSTEM,
+            difficulty=difficulty,
+            category=category,
             max_steps=task_metadata.get("max_steps", self.max_turns),
             validation_query=task_metadata.get("validation_query"),
             expected_result=task_metadata.get("expected_result"),
