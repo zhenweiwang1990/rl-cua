@@ -112,6 +112,8 @@ vllm:
   enable_lora: ${rollout.use_lora}
   lora_modules: '{"name": "${gconfig.lora_name}", "path": "${actor.path}", "base_model_name": "${actor.path}"}'
   enforce_eager: true
+  # 禁用 sliding window 与 rope_scaling 不兼容，必须设为 false
+  disable_sliding_window: false
 
 # datasets
 train_dataset:

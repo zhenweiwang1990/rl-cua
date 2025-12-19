@@ -404,7 +404,7 @@ fi
 VLLM_BASE_CMD="$VLLM_BASE_CMD --enable-auto-tool-choice"
 # Use qwen3_coder parser for Qwen3 models (supports text-based extraction)
 # Alternative: qwen3_xml (if model outputs XML format tool calls)
-VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser qwen3_coder"
+VLLM_BASE_CMD="$VLLM_BASE_CMD --tool-call-parser hermes"
 
 # Build the command string
 # Check if model requires newer transformers (Qwen3-VL)
