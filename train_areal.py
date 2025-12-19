@@ -583,10 +583,15 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
         
         如果有 GBOX_API_KEY，则运行环境 rollout；否则回退到文本 workflow。
         """
+        self._logger.info(f"[CUAEnvRolloutWorkflow.__call__] Called with sample keys: {list(sample.keys())}")
+        self._logger.info(f"[CUAEnvRolloutWorkflow.__call__] GBOX_API_KEY present: {bool(self.gbox_api_key)}")
+        
         if not self.gbox_api_key:
+            self._logger.warning("[CUAEnvRolloutWorkflow.__call__] No GBOX_API_KEY, falling back to text-only workflow")
             return super().__call__(sample, **kwargs)
         
         # 运行环境 rollout
+        self._logger.info("[CUAEnvRolloutWorkflow.__call__] Starting environment rollout")
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
@@ -594,6 +599,7 @@ class CUAEnvRolloutWorkflow(RLVRWorkflow):
             asyncio.set_event_loop(loop)
         
         sample = loop.run_until_complete(self._run_env_rollout(sample))
+        self._logger.info(f"[CUAEnvRolloutWorkflow.__call__] Rollout completed, reward: {sample.get('reward', 'N/A')}")
         
         return sample
 
