@@ -83,11 +83,13 @@ actor:
   weight_update_mode: xccl
 
   # lora
+  # 注意：对于多模态模型（Qwen3-VL），vLLM 只支持对语言模型部分应用 LoRA
+  # 不能使用 [all-linear]，因为会尝试对视觉编码器也应用 LoRA，导致错误
   use_lora: ${rollout.use_lora}
   peft_type: lora
   lora_rank: 8
   lora_alpha: 16
-  target_modules: [all-linear]
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
 ref:
   experiment_name: ${experiment_name}
