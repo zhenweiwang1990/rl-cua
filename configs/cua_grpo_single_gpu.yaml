@@ -122,7 +122,7 @@ vllm:
 
 # datasets
 train_dataset:
-  batch_size: 1
+  batch_size: 2
   shuffle: true
   pin_memory: true
   num_workers: 2
@@ -131,7 +131,7 @@ train_dataset:
   max_length: 8192
 
 valid_dataset:
-  batch_size: 1
+  batch_size: 2
   shuffle: false
   pin_memory: true
   num_workers: 2

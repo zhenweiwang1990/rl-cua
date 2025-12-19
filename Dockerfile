@@ -16,7 +16,7 @@ RUN uv pip install --no-build-isolation --system --no-cache-dir \
 
 # ============ 复制项目代码 ============
 # 复制 rl-cua 项目代码到工作目录
-COPY rl-cua /workspace
+COPY . /workspace
 
 # ============ 入口点 ============
 ENTRYPOINT ["python"]

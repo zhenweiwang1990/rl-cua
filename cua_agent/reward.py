@@ -4,6 +4,7 @@ This module provides simple reward functions that can be extended
 to more sophisticated reward shaping.
 """
 
+import os
 import logging
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
@@ -225,14 +226,15 @@ async def validate_task_completion(
             raise RuntimeError("gbox_client must provide `_sdk` and `box_id` for command execution")
 
         try:
-            result = sdk.client.post(
-                f"/boxes/{box_id}/command",
-                cast_to=dict,
-                body={"command": cmd},
-            )
+            # Use SDK's get() method to get the box object, then use box.command()
+            box = sdk.get(box_id)
+            result = box.command(command=cmd)
+            # result should have stdout, stderr, and exitCode attributes
+            if hasattr(result, 'stdout'):
+                return str(result.stdout) if result.stdout else ""
+            # Fallback for dict-like responses
             if isinstance(result, dict):
-                out = result.get("stdout") or result.get("output") or ""
-                return str(out)
+                return str(result.get("stdout") or result.get("output") or "")
             return str(result)
         except Exception as e:
             logger.error(f"Failed to run shell command '{cmd}': {e}")
@@ -394,5 +396,59 @@ __all__ = [
     "RewardTracker",
     "validate_task_completion",
     "calculate_grpo_advantages",
+    "cua_reward_fn",
 ]
+
+
+def cua_reward_fn(prompt, completions, prompt_ids, completion_ids, answer, **kwargs):
+    """CUA 奖励函数 - 直接使用 workflow 传入的终局奖励。
+    
+    这个函数用于 AReaL 训练框架，直接从 kwargs 中获取终局奖励。
+    
+    Args:
+        prompt: 输入提示
+        completions: 模型输出
+        prompt_ids: 提示的 token IDs
+        completion_ids: 输出的 token IDs
+        answer: 答案（未使用）
+        **kwargs: 包含 reward, task_success, task_completed 等字段
+        
+    Returns:
+        奖励值（float）
+    """
+    if isinstance(completions, list):
+        completion = completions[0] if completions else ""
+    else:
+        completion = completions
+    
+    # 直接使用 workflow 传入的 reward
+    reward = kwargs.get("reward")
+    if reward is None:
+        task_success = kwargs.get("task_success", False)
+        task_completed = kwargs.get("task_completed", False)
+        reward = 1.0 if (task_success or task_completed) else 0.0
+    
+    try:
+        reward = float(reward)
+    except Exception:
+        reward = 0.0
+    
+    rank = int(os.getenv("RANK", "0"))
+    if rank == 0:
+        task_id = kwargs.get("task_id", "N/A")
+        num_turns = kwargs.get("num_turns", 0)
+        max_turns = kwargs.get("max_turns", 15)
+        task_success = kwargs.get("task_success", False)
+        errors = kwargs.get("errors", [])
+        
+        logger.info("=" * 80)
+        logger.info(f"[CUA Rollout Complete] Task ID: {task_id}")
+        logger.info(f"  Turns: {num_turns}/{max_turns}")
+        logger.info(f"  Task Success: {task_success}")
+        logger.info(f"  Reward: {reward:.4f}")
+        if errors:
+            logger.info(f"  Errors ({len(errors)}): {errors[:3]}")
+        logger.info("=" * 80)
+    
+    return reward
 
