@@ -70,6 +70,47 @@ from cua_agent.reward import cua_reward_fn
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
+def _print_training_progress(
+    global_step: int,
+    epoch: int,
+    step: int,
+    steps_per_epoch: int,
+    max_steps: int,
+    stats: dict,
+):
+    """Print a concise training progress summary."""
+    # Extract key stats
+    reward = stats.get("reward", stats.get("rollout/reward", 0.0))
+    if isinstance(reward, (list, tuple)):
+        reward = sum(reward) / len(reward) if reward else 0.0
+    
+    pg_loss = stats.get("grpo_actor/pg_loss", stats.get("pg_loss", 0.0))
+    kl = stats.get("grpo_actor/kl", stats.get("kl", 0.0))
+    lr = stats.get("grpo_actor/lr", stats.get("lr", 0.0))
+    
+    # Calculate progress
+    progress = (global_step + 1) / max_steps * 100
+    
+    # Timing stats
+    timing = stats.get("timing", {})
+    rollout_time = timing.get("rollout", 0)
+    train_time = timing.get("train_step", 0)
+    
+    # Format output
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    
+    print(
+        f"[{timestamp}] Step {global_step + 1}/{max_steps} "
+        f"({progress:.1f}%) | "
+        f"Epoch {epoch + 1} Step {step + 1}/{steps_per_epoch} | "
+        f"Reward: {reward:.3f} | "
+        f"PG Loss: {pg_loss:.4f} | "
+        f"KL: {kl:.4f} | "
+        f"LR: {lr:.2e}",
+        flush=True
+    )
+
+
 def main(args):
     """主函数。"""
     config, _ = load_expr_config(args, GRPOConfig)
@@ -379,6 +420,17 @@ def main(args):
 
         stats = actor.export_stats()
         stats_logger.commit(epoch, step, global_step, stats)
+
+        # Print training progress
+        if actual_rank == 0:
+            _print_training_progress(
+                global_step=global_step,
+                epoch=epoch,
+                step=step,
+                steps_per_epoch=steps_per_epoch,
+                max_steps=max_steps,
+                stats=stats,
+            )
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()

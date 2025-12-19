@@ -570,7 +570,8 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             rollout_logger.set_completion(reward=0.0, success=False, error=str(e))
             logger.error(f"[CUAEnvRollout] Task {task.id} failed: {e}", exc_info=True)
             if not all_results:
-                rollout_logger.flush_to_logger(logger)
+                # Print rollout log directly to stdout for visibility
+                self._print_rollout_summary(rollout_logger, task)
                 return self._empty_result()
 
         finally:
@@ -580,8 +581,8 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             except Exception as e:
                 logger.warning(f"Failed to terminate box: {e}")
 
-            # Flush the rollout log
-            rollout_logger.flush_to_logger(logger)
+            # Print rollout log directly to stdout for visibility in Docker
+            self._print_rollout_summary(rollout_logger, task)
 
         # Dump traces if configured
         if self.dump_dir and all_results:
@@ -597,6 +598,52 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             return self._empty_result()
 
         return concat_padded_tensors(all_results)
+
+    def _print_rollout_summary(self, rollout_logger: RolloutLogger, task: CUATask):
+        """Print a concise rollout summary to stdout.
+        
+        Uses print() directly to ensure visibility in Docker containers.
+        """
+        import sys
+        
+        duration = rollout_logger.end_time - rollout_logger.start_time if rollout_logger.end_time else 0
+        
+        # Status indicators
+        if rollout_logger.final_success:
+            status = "✅ SUCCESS"
+            status_color = "\033[92m"  # Green
+        else:
+            status = "❌ FAILED"
+            status_color = "\033[91m"  # Red
+        reset = "\033[0m"
+        
+        # Build summary line
+        summary_parts = [
+            f"[Rollout] {task.id}",
+            f"{status_color}{status}{reset}",
+            f"Turns: {rollout_logger.total_turns}/{rollout_logger.max_turns}",
+            f"Reward: {rollout_logger.final_reward:.2f}",
+            f"Time: {duration:.1f}s",
+            f"Tokens: {rollout_logger.total_model_tokens}",
+        ]
+        
+        # Print summary
+        print(" | ".join(summary_parts), flush=True)
+        
+        # If there were errors, print them
+        if rollout_logger.errors:
+            for error in rollout_logger.errors[-3:]:  # Last 3 errors
+                print(f"  └─ Error: {error[:100]}", flush=True)
+        
+        # Optionally print full log to file if dump_dir is configured
+        if self.dump_dir:
+            try:
+                log_path = os.path.join(self.dump_dir, "rollout_logs", f"{task.id}.log")
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "w") as f:
+                    f.write(rollout_logger.format_log())
+            except Exception:
+                pass  # Silently ignore log file errors
 
     def _empty_result(self) -> dict[str, torch.Tensor]:
         """Return empty result tensor dict."""
