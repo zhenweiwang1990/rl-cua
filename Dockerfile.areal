@@ -9,14 +9,10 @@ RUN uv pip install --no-build-isolation --system --no-cache-dir \
     safetensors>=0.4.5 \
     Pillow>=10.4.0 \
     python-dotenv>=1.0.1 \
-    uptrace>=1.22.0 \ 
-    dotenv \
-    opentelemetry-api>=1.20.0 \
-    opentelemetry-sdk>=1.20.0 \
-    opentelemetry-exporter-otlp>=1.20.0 
+    dotenv
 # ============ 安装 GBox ============
 RUN uv pip install --no-build-isolation --system --no-cache-dir \
-    git+https://github.com/babelcloud/gbox-cua.git@v0.0.3
+    git+https://github.com/babelcloud/gbox-cua.git@v0.0.4
 
 # ============ 复制项目代码 ============
 # 复制 rl-cua 项目代码到工作目录

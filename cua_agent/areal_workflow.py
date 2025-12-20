@@ -22,7 +22,6 @@ References:
 """
 
 import asyncio
-import atexit
 import json
 import logging
 import os
@@ -42,20 +41,8 @@ from gbox_cua.tools import get_tools_schema
 from cua_agent.tasks import CUATask, TaskCategory, TaskDifficulty
 from cua_agent.episode_runner import EpisodeRunner
 from cua_agent.workflow_utils import create_empty_result
-from cua_agent.profiler import init_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
-
-# Initialize tracing at module load if ENABLE_TRACING is set
-_tracing_initialized = init_tracing(
-    service_name=os.getenv("OTEL_SERVICE_NAME", "cua-agent"),
-    service_version=os.getenv("OTEL_SERVICE_VERSION", "1.0.0"),
-    deployment_environment=os.getenv("DEPLOYMENT_ENVIRONMENT", "development"),
-)
-
-# Register shutdown handler
-if _tracing_initialized:
-    atexit.register(shutdown_tracing)
 
 
 class CUAEnvRolloutWorkflow(RolloutWorkflow):
