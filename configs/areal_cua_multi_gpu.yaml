@@ -1,0 +1,215 @@
+# configs/areal_cua_multi_gpu.yaml
+# AReaL CUA GRPO Training - Multi-GPU (DDP) Configuration
+# For Qwen3-VL-32B-Instruct with LoRA on 4/8 GPUs
+#
+# Usage:
+#   # With torchrun (recommended)
+#   torchrun --nproc_per_node=4 train_areal_cua.py --config configs/areal_cua_multi_gpu.yaml
+#
+#   # With AReaL launcher
+#   python -m areal.launcher.local train_areal_cua.py --config configs/areal_cua_multi_gpu.yaml
+
+experiment_name: cua-grpo-multi
+trial_name: trial0
+
+seed: 42
+enable_offload: false
+total_train_epochs: 10
+tokenizer_path: ${actor.path}
+
+# Cluster configuration for multi-GPU (4 GPUs)
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 4
+  fileroot: /workspace/outputs/areal_cua_multi
+  name_resolve:
+    type: nfs
+    nfs_record_root: /workspace/outputs/areal_cua_multi/name_resolve
+
+# Allocation mode for multi-GPU
+# vLLM uses 2 GPUs, trainer uses 4 GPUs (data parallel)
+# Format: vllm:d{devices}p{processes}t{threads}+d{devices}p{processes}t{threads}
+allocation_mode: vllm:d2p1t2+d4p1t4
+
+# Rollout configuration (AReaL's async rollout engine)
+rollout:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  # max_concurrent_rollouts = batch_size × n_samples × dp_size
+  max_concurrent_rollouts: 32
+  queue_size: null
+  consumer_batch_size: ${train_dataset.batch_size}
+  max_head_offpolicyness: 2
+  enable_rollout_tracing: false
+  use_lora: true
+
+# Generation configuration
+gconfig:
+  # n_samples: Number of PARALLEL independent episodes per task for GRPO
+  # With multi-GPU, each rank processes its own batch
+  n_samples: 4
+  min_new_tokens: 0
+  max_new_tokens: 1024
+  greedy: false
+  temperature: 0.7
+
+# Actor (policy model) configuration
+actor:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3-VL-32B-Instruct
+  init_from_scratch: false
+  disable_dropout: true
+  gradient_checkpointing: true
+  dtype: bfloat16
+  
+  # Larger microbatch for multi-GPU (more memory available)
+  mb_spec:
+    max_tokens_per_mb: 8192
+  
+  # Optimizer
+  optimizer:
+    type: adam
+    lr: 2.0e-5  # Slightly higher LR for multi-GPU
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.999
+    eps: 1e-8
+    lr_scheduler_type: cosine
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.05
+  
+  # GRPO settings
+  group_size: ${gconfig.n_samples}
+  eps_clip: 0.2
+  temperature: ${gconfig.temperature}
+  reward_scaling: 1.0
+  reward_bias: 0.0
+  kl_ctl: 0.01
+  ppo_n_minibatches: 2  # More minibatches for multi-GPU
+  recompute_logprob: true
+  use_decoupled_loss: true
+  behav_imp_weight_cap: 5.0
+  dynamic_sampling: false
+  
+  # Reward normalization (GRPO group-wise)
+  reward_norm:
+    mean_level: group
+    std_level: group
+    group_size: ${gconfig.n_samples}
+  
+  # Advantage normalization (across batch for DDP)
+  adv_norm:
+    mean_level: batch
+    std_level: batch
+  
+  max_new_tokens: ${gconfig.max_new_tokens}
+  weight_update_mode: xccl  # NCCL for multi-GPU
+  
+  # LoRA configuration (Vision + Cross-modal)
+  use_lora: true
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+# Reference model (for KL divergence)
+ref:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: ${actor.path}
+  init_from_scratch: false
+  disable_dropout: true
+  dtype: ${actor.dtype}
+  mb_spec:
+    max_tokens_per_mb: 8192
+  optimizer: null
+
+# vLLM configuration (AReaL managed, uses 2 GPUs with tensor parallel)
+vllm:
+  model: ${actor.path}
+  seed: ${seed}
+  skip_tokenizer_init: false
+  dtype: ${actor.dtype}
+  max_model_len: 16384  # Larger context for multi-GPU
+  # More memory per GPU when vLLM has dedicated GPUs
+  gpu_memory_utilization: 0.85
+  tensor_parallel_size: 2
+  enable_lora: true
+  enforce_eager: true
+  disable_sliding_window: false
+
+# Training dataset
+train_dataset:
+  batch_size: 4  # Larger batch for multi-GPU
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  drop_last: true
+  path: cua_agent.tasks:get_areal_train_dataset
+  type: rl
+  max_length: 8192
+
+# Validation dataset
+valid_dataset:
+  batch_size: 4
+  shuffle: false
+  pin_memory: true
+  num_workers: 4
+  path: cua_agent.tasks:get_areal_eval_dataset
+  type: rl
+  max_length: 8192
+
+# Checkpoint saving
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 20
+  freq_secs: null
+
+# Recovery configuration
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 1800
+
+# Evaluation configuration
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: 20
+  freq_secs: null
+
+# Logging configuration
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled
+    project: cua-grpo-multi
+    entity: null
+
+# Launcher configuration
+launcher:
+  inference_server_cpus_per_gpu: 8
+  inference_server_mem_per_gpu: 32768
+  trainer_cpus_per_gpu: 8
+  trainer_mem_per_gpu: 32768
+

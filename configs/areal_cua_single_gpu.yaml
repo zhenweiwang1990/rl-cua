@@ -1,8 +1,12 @@
-# configs/cua_grpo_single_gpu.yaml
-# CUA Agent GRPO 训练配置 - 单 GPU (H200) 优化版
-# 基于 AReal 官方示例格式: https://github.com/inclusionAI/AReaL/blob/main/examples/lora/gsm8k_grpo_lora_vllm.yaml
+# configs/areal_cua_single_gpu.yaml
+# AReaL CUA GRPO Training - Single GPU Configuration
+# For Qwen3-VL-32B-Instruct with LoRA
+#
+# Usage:
+#   python train_areal_cua.py --config configs/areal_cua_single_gpu.yaml --loader hf
+#   python train_areal_cua.py --config configs/areal_cua_single_gpu.yaml --loader unsloth
 
-experiment_name: cua-grpo-single-gpu
+experiment_name: cua-grpo-single
 trial_name: trial0
 
 seed: 42
@@ -10,60 +14,63 @@ enable_offload: false
 total_train_epochs: 10
 tokenizer_path: ${actor.path}
 
+# Cluster configuration for single GPU
 cluster:
   n_nodes: 1
   n_gpus_per_node: 1
-  fileroot: /workspace/outputs/grpo_cua_single_gpu
+  fileroot: /workspace/outputs/areal_cua_single
   name_resolve:
     type: nfs
-    nfs_record_root: /workspace/outputs/grpo_cua_single_gpu/name_resolve
+    nfs_record_root: /workspace/outputs/areal_cua_single/name_resolve
 
-# AReal 官方推荐：使用内置 vLLM 服务（由 AReal 自动管理）
-# 格式：vllm:d{devices}p{processes}t{threads}+d{devices}p{processes}t{threads}
-# 第一部分是 vLLM 服务器，第二部分是训练器
+# Allocation mode: vLLM on same GPU as trainer (shared memory)
+# Format: vllm:d{devices}p{processes}t{threads}+d{devices}p{processes}t{threads}
+# First part is vLLM server, second is trainer
 allocation_mode: vllm:d1p1t1+d1p1t1
 
+# Rollout configuration (AReaL's async rollout engine)
 rollout:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  max_concurrent_rollouts: 8  # = batch_size × n_samples = 2 × 4 concurrent GBox VMs
+  # max_concurrent_rollouts = batch_size × n_samples = concurrent GBox VMs
+  max_concurrent_rollouts: 8
   queue_size: null
   consumer_batch_size: ${train_dataset.batch_size}
   max_head_offpolicyness: 2
   enable_rollout_tracing: false
-  use_lora: false  # 全参训练，不使用 LoRA
+  use_lora: true
 
+# Generation configuration
 gconfig:
   # n_samples: Number of PARALLEL independent episodes per task for GRPO
-  # 
-  # For CUA Agent, each task runs n_samples episodes in separate GBox environments.
-  # This enables true GRPO group-wise comparison:
+  # Each task runs n_samples episodes in separate GBox environments.
+  # Enables true GRPO group-wise comparison:
   #   - Same task, different rollouts → compare which episode performed better
   #   - Advantages computed within each group of n_samples episodes
   #
   # Resource usage: n_samples GBox VMs run concurrently per task
-  # Example: batch_size=4, n_samples=2 → 4 tasks × 2 episodes = 8 GBox VMs
-  #
-  # Recommended settings:
-  #   - n_samples=2: Good balance of GRPO benefits vs resource usage
-  #   - n_samples=4: Better GRPO signal, but 4x GBox environments
-  n_samples: 4  # Each task runs 4 parallel episodes for GRPO group comparison
+  # Example: batch_size=2, n_samples=4 → 2 tasks × 4 episodes = 8 GBox VMs
+  n_samples: 4
   min_new_tokens: 0
   max_new_tokens: 1024
   greedy: false
   temperature: 0.7
 
+# Actor (policy model) configuration
 actor:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
-  path: Qwen/Qwen3-VL-8B-Instruct
+  path: Qwen/Qwen3-VL-32B-Instruct
   init_from_scratch: false
   disable_dropout: true
   gradient_checkpointing: true
   dtype: bfloat16
+  
+  # Microbatch configuration
   mb_spec:
-    # 降低 microbatch 大小以节省显存
     max_tokens_per_mb: 4096
+  
+  # Optimizer
   optimizer:
     type: adam
     lr: 1.0e-5
@@ -74,32 +81,50 @@ actor:
     lr_scheduler_type: cosine
     gradient_clipping: 1.0
     warmup_steps_proportion: 0.05
+  
+  # GRPO settings
   group_size: ${gconfig.n_samples}
   eps_clip: 0.2
   temperature: ${gconfig.temperature}
   reward_scaling: 1.0
   reward_bias: 0.0
-  kl_ctl: 0.01
+  kl_ctl: 0.01  # KL penalty coefficient
   ppo_n_minibatches: 1
   recompute_logprob: true
   use_decoupled_loss: true
   behav_imp_weight_cap: 5.0
   dynamic_sampling: false
+  
+  # Reward normalization (GRPO group-wise)
   reward_norm:
     mean_level: group
     std_level: group
     group_size: ${gconfig.n_samples}
+  
+  # Advantage normalization
   adv_norm:
     mean_level: batch
     std_level: batch
-  max_new_tokens: ${gconfig.max_new_tokens}
-  weight_update_mode: xccl
   
-  # 全参训练：不使用 LoRA，直接训练完整模型
-  # 优点：避免 LoRA 兼容性问题，训练更稳定
-  # 缺点：需要更多显存，单 GPU 可能需要更小的 batch size
-  use_lora: false
+  max_new_tokens: ${gconfig.max_new_tokens}
+  weight_update_mode: disk  # disk for single GPU
+  
+  # LoRA configuration (Vision + Cross-modal)
+  use_lora: true
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
 
+# Reference model (for KL divergence)
 ref:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -108,51 +133,35 @@ ref:
   disable_dropout: true
   dtype: ${actor.dtype}
   mb_spec:
-    # 降低 microbatch 大小以节省显存
     max_tokens_per_mb: 4096
   optimizer: null
 
-# vLLM 配置（内置 vLLM 服务器，由 AReal 自动启动和管理）
-# 全参训练：vLLM 加载完整模型，直接接收全参权重更新
-# 注意：单 GPU 模式下，vLLM 和训练器共享显存，需要合理分配
+# vLLM configuration (AReaL managed)
 vllm:
   model: ${actor.path}
   seed: ${seed}
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
   max_model_len: 8192
-  # 降低 vLLM 内存使用率，为训练器预留更多显存
-  # 0.35 = 约 49GB，训练器需要约 70-80GB（模型+优化器状态）
+  # Memory allocation for single GPU (shared with trainer)
+  # 0.35 = ~49GB for vLLM, rest for trainer
   gpu_memory_utilization: 0.35
-  # 全参训练：不使用 LoRA
-  enable_lora: false
+  enable_lora: true
   enforce_eager: true
-  # 禁用 sliding window 与 rope_scaling 不兼容，必须设为 false
   disable_sliding_window: false
-  # 注意：工具调用支持需要在 vLLM 启动时通过命令行参数传递
-  # AReaL 的 vLLMConfig 不支持 enable_auto_tool_choice 和 tool_call_parser
-  # 如果 vLLM 不支持原生 tool_calls，workflow 会自动回退到 JSON 解析模式
 
-# datasets
-# IMPORTANT: For CUA training with n_samples > 1:
-#   - batch_size = number of TASKS per training step
-#   - Each task produces n_samples episodes
-#   - Effective samples per step = batch_size × n_samples
-#
-# Example: batch_size=2, n_samples=4 → 2 tasks × 4 episodes = 8 samples
-# The granularity check: (batch_size × n_samples) % n_samples = 0 ✓
-#
-# Resource usage: batch_size × n_samples = concurrent GBox VMs
+# Training dataset
 train_dataset:
-  batch_size: 2  # 2 tasks × 4 episodes/task = 8 samples per batch, 8 GBox VMs
+  batch_size: 2  # 2 tasks × 4 episodes/task = 8 samples per batch
   shuffle: true
   pin_memory: true
   num_workers: 2
-  drop_last: true  # Ensure all batches have the same size, divisible by group_size
+  drop_last: true
   path: cua_agent.tasks:get_areal_train_dataset
   type: rl
   max_length: 8192
 
+# Validation dataset
 valid_dataset:
   batch_size: 2
   shuffle: false
@@ -162,7 +171,7 @@ valid_dataset:
   type: rl
   max_length: 8192
 
-# Utilities
+# Checkpoint saving
 saver:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -171,6 +180,7 @@ saver:
   freq_steps: 10
   freq_secs: null
 
+# Recovery configuration
 recover:
   mode: disabled
   experiment_name: ${experiment_name}
@@ -180,6 +190,7 @@ recover:
   freq_steps: null
   freq_secs: 3600
 
+# Evaluation configuration
 evaluator:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
@@ -188,17 +199,20 @@ evaluator:
   freq_steps: 10
   freq_secs: null
 
+# Logging configuration
 stats_logger:
   experiment_name: ${experiment_name}
   trial_name: ${trial_name}
   fileroot: ${cluster.fileroot}
   wandb:
     mode: disabled
-    project: cua-grpo-single-gpu
+    project: cua-grpo
     entity: null
 
+# Launcher configuration
 launcher:
   inference_server_cpus_per_gpu: 4
   inference_server_mem_per_gpu: 16384
   trainer_cpus_per_gpu: 4
   trainer_mem_per_gpu: 16384
+

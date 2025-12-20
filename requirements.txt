@@ -1,50 +1,104 @@
 # CUA Agent Dependencies
+# ======================
 
 # GBox SDK (official)
 # Install from GitHub: pip install git+https://github.com/babelcloud/gbox-sdk-py.git
-# Note: This package may not be on PyPI, install it separately in Dockerfile
+# Note: This package may not be on PyPI, install it separately
 
 # GBox CUA shared code (install from git source)
 git+https://github.com/babelcloud/gbox-cua.git
 
-# Image Processing
-Pillow>=10.0.0
-
-# HTTP Client
-httpx>=0.25.0
-aiohttp>=3.9.0
-openai>=1.20.0  # For vLLM OpenAI-compatible API
-
-# Utilities
-pydantic>=2.0.0
-python-dotenv>=1.0.0
-tenacity>=8.2.0
-
-# Core ML/DL (required for training)
+# ============================================================
+# Core ML/DL
+# ============================================================
 numpy>=1.24.0
 torch>=2.0.0
 datasets>=2.14.0
 
+# ============================================================
+# Transformers and Model Loading
+# ============================================================
+transformers>=4.40.0
+accelerate>=0.25.0
+bitsandbytes>=0.42.0  # For 4-bit quantization
+sentencepiece>=0.1.99
+
+# ============================================================
+# Unsloth (for efficient VLM training)
+# ============================================================
+# Unsloth 需要特殊安装步骤，请参考下面的安装指南
+#
+# 对于 CUDA 12.1:
+#   pip install unsloth
+#
+# 对于开发版本:
+#   pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+#
+# 对于 Colab:
+#   pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+#
+# 注意：Unsloth 可能与某些 transformers 版本不兼容，
+#       请参考官方文档: https://github.com/unslothai/unsloth
+
+# ============================================================
 # RL Training
+# ============================================================
 trl>=0.8.0  # Hugging Face TRL for GRPO
-peft>=0.9.0  # Parameter-Efficient Fine-Tuning
+peft>=0.9.0  # Parameter-Efficient Fine-Tuning (LoRA)
 safetensors>=0.4.0  # For loading model weights
 
+# ============================================================
+# Image Processing
+# ============================================================
+Pillow>=10.0.0
+
+# ============================================================
+# HTTP Client
+# ============================================================
+httpx>=0.25.0
+aiohttp>=3.9.0
+openai>=1.20.0  # For vLLM OpenAI-compatible API (legacy support)
+
+# ============================================================
+# Utilities
+# ============================================================
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+pyyaml>=6.0.0
+colorama>=0.4.6  # For colored terminal output
+
+# ============================================================
+# Async support
+# ============================================================
+aiofiles>=23.2.0
+
+# ============================================================
 # Logging & Monitoring
+# ============================================================
 wandb>=0.16.0  # Weights & Biases integration
 tqdm>=4.65.0
 
-# Unsloth for efficient training (optional but recommended)
-# pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
-# Note: Unsloth needs special installation, see README
-
-# Note: For GRPO training, you need:
-# 1. vLLM server running for rollout collection
-# 2. GBox API key for Android box environments
-# 3. Sufficient GPU memory for LoRA training
-
-# For inference only (no training):
-# Agent supports two modes:
-# 1. Server mode: Connect to external vLLM server via VLLM_API_BASE
-# 2. OpenRouter mode: Use OpenRouter API via OPENROUTER_API_KEY
-
+# ============================================================
+# 安装说明
+# ============================================================
+#
+# 1. 基本安装:
+#    pip install -r requirements.txt
+#
+# 2. 安装 Unsloth (选择适合的版本):
+#    # CUDA 12.1
+#    pip install unsloth
+#    
+#    # 或开发版本
+#    pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+#
+# 3. 安装 GBox SDK:
+#    pip install git+https://github.com/babelcloud/gbox-sdk-py.git
+#
+# 4. 设置环境变量:
+#    export GBOX_API_KEY=your_api_key
+#    export MODEL_NAME=Qwen/Qwen3-VL-8B-Instruct
+#
+# 5. 运行训练:
+#    python train_unsloth_grpo.py --config configs/unsloth_grpo.yaml

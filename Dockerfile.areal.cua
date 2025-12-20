@@ -1,0 +1,53 @@
+# Dockerfile.areal.cua
+# AReaL CUA GRPO Training Docker Image
+# Based on AReaL official runtime image
+#
+# Build:
+#   docker build -f Dockerfile.areal.cua -t areal-cua:latest .
+#
+# Run (single GPU):
+#   docker run --gpus '"device=0"' -v ./outputs:/workspace/outputs \
+#     -e GBOX_API_KEY=xxx areal-cua:latest
+#
+# Run (multi-GPU):
+#   docker run --gpus all -v ./outputs:/workspace/outputs \
+#     -e GBOX_API_KEY=xxx areal-cua:latest \
+#     --config configs/areal_cua_multi_gpu.yaml
+
+FROM ghcr.io/inclusionai/areal-runtime:v0.5.1
+
+# Install additional dependencies
+RUN uv pip install --no-build-isolation --system --no-cache-dir \
+    safetensors>=0.4.5 \
+    Pillow>=10.4.0 \
+    python-dotenv>=1.0.1 \
+    colorama>=0.4.6 \
+    aiofiles>=23.0.0 \
+    httpx>=0.27.0 \
+    peft>=0.14.0
+
+# Install Unsloth (optional, for acceleration)
+# Note: Unsloth requires specific CUDA version, may need adjustment
+RUN uv pip install --no-build-isolation --system --no-cache-dir \
+    unsloth || echo "Unsloth installation failed, will use HF fallback"
+
+# Install GBox CUA
+RUN uv pip install --no-build-isolation --system --no-cache-dir \
+    git+https://github.com/babelcloud/gbox-cua.git@v0.0.4
+
+# Copy project code
+COPY . /workspace
+
+# Set working directory
+WORKDIR /workspace
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV CUA_MAX_TURNS=15
+ENV CUA_CONTEXT_WINDOW=5
+
+# Default entry point
+ENTRYPOINT ["python", "train_areal_cua.py"]
+CMD ["--config", "configs/areal_cua_single_gpu.yaml"]
+

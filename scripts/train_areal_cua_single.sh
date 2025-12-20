@@ -1,0 +1,117 @@
+#!/bin/bash
+# ============================================================================
+# AReaL CUA GRPO Training - Single GPU Launch Script
+# ============================================================================
+#
+# Usage:
+#   # HF mode (validation)
+#   ./scripts/train_areal_cua_single.sh --loader hf
+#
+#   # Unsloth mode (acceleration)
+#   ./scripts/train_areal_cua_single.sh --loader unsloth
+#
+# Environment Variables:
+#   GBOX_API_KEY     - GBox API key (required)
+#   MODEL_NAME       - Model to train (default: Qwen/Qwen3-VL-32B-Instruct)
+#   CUA_MAX_TURNS    - Max turns per episode (default: 15)
+#   OUTPUT_DIR       - Output directory (default: ./outputs/areal_cua_single)
+#
+# ============================================================================
+
+set -e
+
+# ============ Configuration ============
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Default values
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/outputs/areal_cua_single}"
+CUA_MAX_TURNS="${CUA_MAX_TURNS:-15}"
+CUA_CONTEXT_WINDOW="${CUA_CONTEXT_WINDOW:-5}"
+CONFIG_FILE="${CONFIG_FILE:-configs/areal_cua_single_gpu.yaml}"
+LOADER="${LOADER:-hf}"
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --loader)
+            LOADER="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# ============ Validation ============
+if [ -z "$GBOX_API_KEY" ]; then
+    echo "❌ Error: GBOX_API_KEY environment variable is required"
+    echo "   Set it with: export GBOX_API_KEY=your_api_key"
+    exit 1
+fi
+
+# ============ Setup ============
+cd "$PROJECT_DIR"
+
+# Create output directory
+mkdir -p "$OUTPUT_DIR"
+
+# Export environment variables
+export MODEL_NAME
+export CUA_MAX_TURNS
+export CUA_CONTEXT_WINDOW
+export PYTHONUNBUFFERED=1
+
+# ============ Print Configuration ============
+echo ""
+echo "=============================================="
+echo "🚀 AReaL CUA GRPO Training - Single GPU"
+echo "=============================================="
+echo "  Model:        $MODEL_NAME"
+echo "  Loader:       $LOADER"
+echo "  Config:       $CONFIG_FILE"
+echo "  Output:       $OUTPUT_DIR"
+echo "  Max turns:    $CUA_MAX_TURNS"
+echo "  Context:      $CUA_CONTEXT_WINDOW"
+echo "  GBox API:     ***${GBOX_API_KEY: -4}"
+echo "=============================================="
+echo ""
+
+# ============ Launch Training ============
+# Method 1: Direct Python (simpler, good for debugging)
+if [ "$LOADER" = "unsloth" ]; then
+    echo "📦 Using Unsloth model loader (2x faster)"
+else
+    echo "📦 Using HuggingFace model loader (validation mode)"
+fi
+
+echo ""
+echo "🏃 Starting training..."
+echo ""
+
+python train_areal_cua.py \
+    --config "$CONFIG_FILE" \
+    --loader "$LOADER"
+
+# Method 2: With AReaL launcher (for managed vLLM)
+# Uncomment this and comment out the above if you want AReaL to manage vLLM
+# python -m areal.launcher.local train_areal_cua.py \
+#     --config "$CONFIG_FILE" \
+#     --loader "$LOADER"
+
+echo ""
+echo "✅ Training completed!"
+echo "   Output: $OUTPUT_DIR"
+echo ""
+

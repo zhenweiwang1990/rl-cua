@@ -1,0 +1,181 @@
+# docker-compose.areal.cua.yml
+# AReaL CUA GRPO Training - Docker Compose Configuration
+#
+# Usage:
+#   # Single GPU training
+#   docker-compose -f docker-compose.areal.cua.yml up trainer-single
+#
+#   # Multi-GPU training (4 GPUs)
+#   docker-compose -f docker-compose.areal.cua.yml up trainer-multi
+#
+#   # Build image
+#   docker-compose -f docker-compose.areal.cua.yml build
+
+version: "3.8"
+
+services:
+  # ============ Single GPU Training ============
+  trainer-single:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal.cua
+    image: areal-cua:latest
+    container_name: areal-cua-single
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      # Required
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      # Optional overrides
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}
+      - CUA_MAX_TURNS=${CUA_MAX_TURNS:-15}
+      - CUA_CONTEXT_WINDOW=${CUA_CONTEXT_WINDOW:-5}
+      - GBOX_MODEL=${GBOX_MODEL:-gbox-handy-1}
+      # NVIDIA
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      # Python
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Output directory
+      - ./outputs:/workspace/outputs
+      # HuggingFace cache (optional, speeds up model loading)
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    working_dir: /workspace
+    command: ["--config", "configs/areal_cua_single_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    shm_size: "16gb"
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+
+  # ============ Multi-GPU Training (4 GPUs) ============
+  trainer-multi:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal.cua
+    image: areal-cua:latest
+    container_name: areal-cua-multi
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    environment:
+      # Required
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      # Optional overrides
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}
+      - CUA_MAX_TURNS=${CUA_MAX_TURNS:-15}
+      - CUA_CONTEXT_WINDOW=${CUA_CONTEXT_WINDOW:-5}
+      - GBOX_MODEL=${GBOX_MODEL:-gbox-handy-1}
+      # NVIDIA
+      - NVIDIA_VISIBLE_DEVICES=0,1,2,3
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
+      # Distributed
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
+      - WORLD_SIZE=4
+      # NCCL
+      - NCCL_DEBUG=WARN
+      - NCCL_IB_DISABLE=0
+      # Python
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./outputs:/workspace/outputs
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    working_dir: /workspace
+    # Use torchrun for multi-GPU
+    entrypoint: ["torchrun", "--nproc_per_node=4", "--master_port=29500", "train_areal_cua.py"]
+    command: ["--config", "configs/areal_cua_multi_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    shm_size: "64gb"
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+
+  # ============ Multi-GPU Training (8 GPUs) ============
+  trainer-8gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal.cua
+    image: areal-cua:latest
+    container_name: areal-cua-8gpu
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}
+      - CUA_MAX_TURNS=${CUA_MAX_TURNS:-15}
+      - CUA_CONTEXT_WINDOW=${CUA_CONTEXT_WINDOW:-5}
+      - GBOX_MODEL=${GBOX_MODEL:-gbox-handy-1}
+      - NVIDIA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+      - CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
+      - WORLD_SIZE=8
+      - NCCL_DEBUG=WARN
+      - NCCL_IB_DISABLE=0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./outputs:/workspace/outputs
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    working_dir: /workspace
+    entrypoint: ["torchrun", "--nproc_per_node=8", "--master_port=29500", "train_areal_cua.py"]
+    command: ["--config", "configs/areal_cua_multi_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    shm_size: "128gb"
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+
+  # ============ Development Shell ============
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.areal.cua
+    image: areal-cua:latest
+    container_name: areal-cua-dev
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - GBOX_API_KEY=${GBOX_API_KEY}
+      - MODEL_NAME=${MODEL_NAME:-Qwen/Qwen3-VL-32B-Instruct}
+      - CUA_MAX_TURNS=${CUA_MAX_TURNS:-15}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/workspace
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    working_dir: /workspace
+    entrypoint: ["/bin/bash"]
+    shm_size: "16gb"
+    ipc: host
+    network_mode: host
+    stdin_open: true
+    tty: true
+
+networks:
+  default:
+    driver: bridge
+

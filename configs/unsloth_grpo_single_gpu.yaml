@@ -1,0 +1,91 @@
+# configs/unsloth_grpo_single_gpu.yaml
+# CUA Agent GRPO 训练配置 - 单 GPU 优化版
+#
+# 针对单 GPU (如 H100/A100 80GB) 优化的配置
+# 使用更小的 batch size 和更激进的内存优化
+#
+# 用法：
+#   python train_unsloth_grpo.py --config configs/unsloth_grpo_single_gpu.yaml
+
+# ============================================================
+# 模型配置 (内存优化)
+# ============================================================
+model_name: Qwen/Qwen3-VL-8B-Instruct
+max_seq_length: 4096  # 减小以节省显存
+load_in_4bit: true  # 4-bit 量化
+dtype: bfloat16
+
+# ============================================================
+# LoRA 配置 (Vision + Cross-modal)
+# ============================================================
+use_lora: true
+lora_r: 8  # 较小的 rank 节省显存
+lora_alpha: 16
+lora_dropout: 0.0
+
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  # 可选：添加更多模块增加容量
+  # - gate_proj
+  # - up_proj
+  # - down_proj
+
+# ============================================================
+# 训练超参数 (单 GPU 优化)
+# ============================================================
+learning_rate: 2.0e-5  # 稍高的学习率补偿小 batch
+beta: 0.01
+clip_epsilon: 0.2
+
+# 批次设置 (单 GPU 适配)
+# 减小 batch_size 和 num_rollouts 以节省显存
+batch_size: 1  # 每批 1 个任务
+num_rollouts: 2  # 每任务 2 个 rollout
+gradient_accumulation_steps: 4  # 累积梯度补偿小 batch
+max_grad_norm: 1.0
+
+# 训练调度
+max_steps: 100
+warmup_steps: 5
+
+# ============================================================
+# Rollout 配置 (内存优化)
+# ============================================================
+max_turns: 10  # 减少步数节省显存
+max_new_tokens: 512  # 减少生成长度
+temperature: 0.7
+top_p: 0.9
+
+# ============================================================
+# 评估和检查点
+# ============================================================
+eval_steps: 20
+save_steps: 20
+save_total_limit: 3  # 减少保存数量
+
+# 早停
+target_accuracy: 0.70
+patience: 5
+
+# ============================================================
+# GRPO 特定配置
+# ============================================================
+min_group_std: 0.05
+
+# ============================================================
+# 输出配置
+# ============================================================
+output_dir: outputs/unsloth_grpo_single_gpu
+seed: 42
+
+# ============================================================
+# 日志配置
+# ============================================================
+verbose: true
+enable_wandb: false
+wandb_project: cua-grpo-unsloth
+enable_detailed_logging: true
+

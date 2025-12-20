@@ -1,0 +1,103 @@
+# configs/unsloth_grpo.yaml
+# CUA Agent GRPO 训练配置 - Unsloth + HuggingFace 版本
+#
+# 架构：
+# - RL: AReaL-style 异步 Rollout 模式
+# - Rollout: HuggingFace + Unsloth 本地推理
+# - LoRA: Vision + Cross-modal 目标模块
+# - RL 算法: GRPO (Group Relative Policy Optimization)
+# - Reference: HuggingFace 冻结模型
+#
+# 用法：
+#   python train_unsloth_grpo.py --config configs/unsloth_grpo.yaml
+
+# ============================================================
+# 模型配置
+# ============================================================
+model_name: Qwen/Qwen3-VL-8B-Instruct
+max_seq_length: 8192
+load_in_4bit: true
+dtype: bfloat16
+
+# ============================================================
+# LoRA 配置 (Vision + Cross-modal)
+# ============================================================
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.0
+
+# LoRA 目标模块
+# - Language model: q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+# - Vision (cross-modal): 根据模型架构自动检测
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  # Vision encoder projections (如果模型支持)
+  # - visual.attn.q_proj
+  # - visual.attn.k_proj
+  # - visual.attn.v_proj
+
+# ============================================================
+# 训练超参数
+# ============================================================
+learning_rate: 1.0e-5
+beta: 0.01  # KL penalty coefficient
+clip_epsilon: 0.2
+
+# 批次设置
+# batch_size: 每批任务数
+# num_rollouts: 每任务 rollout 数 (GRPO 组大小)
+# 实际样本数 = batch_size × num_rollouts
+batch_size: 2
+num_rollouts: 4
+gradient_accumulation_steps: 1
+max_grad_norm: 1.0
+
+# 训练调度
+max_steps: 200
+warmup_steps: 10
+
+# ============================================================
+# Rollout 配置
+# ============================================================
+max_turns: 15  # 每个 episode 最大步数
+max_new_tokens: 1024
+temperature: 0.7
+top_p: 0.9
+
+# ============================================================
+# 评估和检查点
+# ============================================================
+eval_steps: 10
+save_steps: 10
+save_total_limit: 5
+
+# 早停
+target_accuracy: 0.80
+patience: 5
+
+# ============================================================
+# GRPO 特定配置
+# ============================================================
+min_group_std: 0.05  # 最小组标准差（过滤低方差组）
+
+# ============================================================
+# 输出配置
+# ============================================================
+output_dir: outputs/unsloth_grpo
+seed: 42
+
+# ============================================================
+# 日志配置
+# ============================================================
+verbose: false
+enable_wandb: false
+wandb_project: cua-grpo-unsloth
+enable_detailed_logging: true
+
