@@ -52,6 +52,7 @@ gconfig:
   max_new_tokens: 1024
   greedy: false
   temperature: 0.7
+  lora_name: "lora-cua"
 
 # Actor (policy model) configuration
 actor:
@@ -108,18 +109,10 @@ actor:
   
   # LoRA configuration (Vision + Cross-modal)
   use_lora: true
-  lora:
-    r: 16
-    alpha: 32
-    dropout: 0.0
-    target_modules:
-      - q_proj
-      - k_proj
-      - v_proj
-      - o_proj
-      - gate_proj
-      - up_proj
-      - down_proj
+  peft_type: lora
+  lora_rank: 16
+  lora_alpha: 32
+  target_modules: [all-linear]
 
 # Reference model (for KL divergence)
 ref:

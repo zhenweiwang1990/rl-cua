@@ -40,6 +40,12 @@ services:
       # NVIDIA
       - NVIDIA_VISIBLE_DEVICES=0
       - CUDA_VISIBLE_DEVICES=0
+      # Distributed (single GPU)
+      - RANK=0
+      - LOCAL_RANK=0
+      - WORLD_SIZE=1
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
       # Python
       - PYTHONUNBUFFERED=1
     volumes:
@@ -48,7 +54,8 @@ services:
       # HuggingFace cache (optional, speeds up model loading)
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
     working_dir: /workspace
-    command: ["--config", "configs/areal_cua_single_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    entrypoint: []
+    command: ["sh", "-c", "python train_areal_cua.py --config configs/areal_cua_single_gpu.yaml --loader ${LOADER:-hf}"]
     shm_size: "16gb"
     ipc: host
     network_mode: host
@@ -95,8 +102,8 @@ services:
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
     working_dir: /workspace
     # Use torchrun for multi-GPU
-    entrypoint: ["torchrun", "--nproc_per_node=4", "--master_port=29500", "train_areal_cua.py"]
-    command: ["--config", "configs/areal_cua_multi_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    entrypoint: []
+    command: ["sh", "-c", "torchrun --nproc_per_node=4 --master_port=29500 train_areal_cua.py --config configs/areal_cua_multi_gpu.yaml --loader ${LOADER:-hf}"]
     shm_size: "64gb"
     ipc: host
     network_mode: host
@@ -136,8 +143,8 @@ services:
       - ./outputs:/workspace/outputs
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
     working_dir: /workspace
-    entrypoint: ["torchrun", "--nproc_per_node=8", "--master_port=29500", "train_areal_cua.py"]
-    command: ["--config", "configs/areal_cua_multi_gpu.yaml", "--loader", "${LOADER:-hf}"]
+    entrypoint: []
+    command: ["sh", "-c", "torchrun --nproc_per_node=8 --master_port=29500 train_areal_cua.py --config configs/areal_cua_multi_gpu.yaml --loader ${LOADER:-hf}"]
     shm_size: "128gb"
     ipc: host
     network_mode: host

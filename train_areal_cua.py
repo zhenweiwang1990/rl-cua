@@ -71,6 +71,10 @@ from areal.dataset import get_custom_dataset
 from areal.engine.ppo.actor import FSDPPPOActor
 from areal.engine.vllm_remote import RemotevLLMEngine
 from areal.platforms import current_platform
+
+# Local model engine for PyTorch/Unsloth
+from cua_agent.local_model_engine import LocalModelEngine
+from cua_agent.model_loader import create_model_loader
 from areal.utils import seeding, stats_tracker
 from areal.utils.dataloader import create_dataloader
 from areal.utils.device import log_gpu_stats
@@ -89,21 +93,26 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 logger = logging.getLogger(__name__)
 
 
-def _parse_loader_arg() -> str:
-    """Parse --loader argument from command line."""
+def _parse_loader_arg(args: list) -> tuple[str, list]:
+    """Parse --loader argument from command line and return filtered args.
+    
+    Returns:
+        tuple: (loader_type, filtered_args)
+    """
     loader = "hf"  # Default
-    for i, arg in enumerate(sys.argv):
-        if arg == "--loader" and i + 1 < len(sys.argv):
-            loader = sys.argv[i + 1].lower()
-            # Remove from argv so AReaL doesn't get confused
-            sys.argv.pop(i)
-            sys.argv.pop(i)
-            break
-        elif arg.startswith("--loader="):
-            loader = arg.split("=")[1].lower()
-            sys.argv.pop(i)
-            break
-    return loader
+    filtered_args = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--loader" and i + 1 < len(args):
+            loader = args[i + 1].lower()
+            i += 2  # Skip both --loader and its value
+        elif args[i].startswith("--loader="):
+            loader = args[i].split("=", 1)[1].lower()
+            i += 1  # Skip this argument
+        else:
+            filtered_args.append(args[i])
+            i += 1
+    return loader, filtered_args
 
 
 def _print_training_header(config, loader_type: str, rank: int):
@@ -214,11 +223,11 @@ def _log_grpo_group_stats(batch: dict, actor, rank: int):
 
 def main(args):
     """Main training function."""
-    # Parse loader type
-    loader_type = _parse_loader_arg()
+    # Parse loader type and filter args
+    loader_type, filtered_args = _parse_loader_arg(args)
     
-    # Load config
-    config, _ = load_expr_config(args, GRPOConfig)
+    # Load config with filtered args (without --loader)
+    config, _ = load_expr_config(filtered_args, GRPOConfig)
     config: GRPOConfig
 
     # Get rank information
@@ -293,12 +302,23 @@ def main(args):
         train_batch_size=config.train_dataset.batch_size,
     )
 
-    # Initialize inference engine (vLLM)
-    rollout = RemotevLLMEngine(config.rollout)
-    eval_rollout = RemotevLLMEngine(deepcopy(config.rollout))
-    rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size)
-    eval_rollout.config.max_head_offpolicyness = int(1e12)
-    eval_rollout.initialize()
+    # Initialize inference engine (Local PyTorch/Unsloth instead of vLLM)
+    if loader_type == "unsloth":
+        logger.info("Using Unsloth local model engine for rollouts")
+    else:
+        logger.info("Using HuggingFace local model engine for rollouts")
+    
+    # Create model loader
+    from cua_agent.model_loader import ModelLoaderConfig, LoRAConfig
+    loader_config = ModelLoaderConfig(
+        model_name=config.actor.path,
+        lora=LoRAConfig(enabled=config.actor.use_lora),
+    )
+    model_loader = create_model_loader(loader_type, loader_config)
+    
+    # Create local inference engines
+    rollout = LocalModelEngine(model_loader=model_loader)
+    eval_rollout = LocalModelEngine(model_loader=model_loader)
 
     # Determine weight update mode
     effective_world_size = actual_world_size if dist.is_initialized() else 1
