@@ -49,7 +49,7 @@ gconfig:
   #   - n_samples=4: Better GRPO signal, but 4x GBox environments
   n_samples: 4  # Each task runs 4 parallel episodes for GRPO group comparison
   min_new_tokens: 0
-  max_new_tokens: 1024
+  max_new_tokens: 512  # 降低 max_new_tokens 以加快生成速度（工具调用通常不需要太长输出）
   greedy: false
   temperature: 0.7
 
@@ -120,13 +120,16 @@ vllm:
   seed: ${seed}
   skip_tokenizer_init: false
   dtype: ${actor.dtype}
-  max_model_len: 8192
-  # 降低 vLLM 内存使用率，为训练器预留更多显存
-  # 0.35 = 约 49GB，训练器需要约 70-80GB（模型+优化器状态）
-  gpu_memory_utilization: 0.35
+  max_model_len: 4096  # 降低 max_model_len 以提升推理速度并节省显存
+  # 提高 vLLM 内存使用率以提升批处理能力和推理速度
+  # 0.5 = 约 70GB，为训练器预留约 60GB（模型+优化器状态）
+  # 如果显存不足，可以降低到 0.4-0.45
+  gpu_memory_utilization: 0.5
   # 全参训练：不使用 LoRA
   enable_lora: false
-  enforce_eager: true
+  # 禁用 enforce_eager 以启用 CUDA 图优化，大幅提升推理速度
+  # 注意：如果遇到兼容性问题，可以改回 true
+  enforce_eager: false
   # 禁用 sliding window 与 rope_scaling 不兼容，必须设为 false
   disable_sliding_window: false
   # 注意：工具调用支持需要在 vLLM 启动时通过命令行参数传递
