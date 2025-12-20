@@ -470,32 +470,26 @@ def main(args):
             )
 
         dist.barrier(device_ids=[actor.device.index])
-            current_platform.synchronize()
+        current_platform.synchronize()
 
-            stats = actor.export_stats()
-            stats_logger.commit(epoch, step, global_step, stats)
-            
-            # Record final step stats
-            if isinstance(stats, dict):
-                step_span.set_attribute("final.reward", stats.get("reward", stats.get("rollout/reward", 0.0)))
-                step_span.set_attribute("final.pg_loss", stats.get("grpo_actor/pg_loss", 0.0))
-                step_span.set_attribute("final.kl", stats.get("grpo_actor/kl", 0.0))
+        stats = actor.export_stats()
+        stats_logger.commit(epoch, step, global_step, stats)
 
-            # Print training progress
-            if actual_rank == 0:
-                _print_training_progress(
-                    global_step=global_step,
-                    epoch=epoch,
-                    step=step,
-                    steps_per_epoch=steps_per_epoch,
-                    max_steps=max_steps,
-                    stats=stats,
-                )
+        # Print training progress
+        if actual_rank == 0:
+            _print_training_progress(
+                global_step=global_step,
+                epoch=epoch,
+                step=step,
+                steps_per_epoch=steps_per_epoch,
+                max_steps=max_steps,
+                stats=stats,
+            )
 
-            dist.barrier(device_ids=[actor.device.index])
-            current_platform.synchronize()
+        dist.barrier(device_ids=[actor.device.index])
+        current_platform.synchronize()
 
-            rollout.resume()
+        rollout.resume()
 
     stats_logger.close()
     eval_rollout.destroy()
