@@ -10,6 +10,7 @@ RUN uv pip install --no-build-isolation --system --no-cache-dir \
     Pillow>=10.4.0 \
     python-dotenv>=1.0.1 \
     uptrace>=1.22.0 \ 
+    dotenv \
     opentelemetry-api>=1.20.0 \
     opentelemetry-sdk>=1.20.0 \
     opentelemetry-exporter-otlp>=1.20.0 
