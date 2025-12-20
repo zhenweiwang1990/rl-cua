@@ -91,26 +91,43 @@ def init_tracing(
     enable_tracing = os.getenv("ENABLE_TRACING", "false").lower() == "true"
     dsn = os.getenv("UPTRACE_DSN", "")
     
+    # Print diagnostic info
+    logger.info(f"[Tracing] ENABLE_TRACING={enable_tracing}, UPTRACE_DSN={'SET' if dsn else 'NOT SET'}")
+    logger.info(f"[Tracing] OTEL_AVAILABLE={OTEL_AVAILABLE}, UPTRACE_AVAILABLE={UPTRACE_AVAILABLE}")
+    
     if not enable_tracing:
-        logger.info("Tracing disabled. Set ENABLE_TRACING=true to enable.")
+        logger.warning("=" * 60)
+        logger.warning("Tracing is DISABLED. To enable:")
+        logger.warning("  export ENABLE_TRACING=true")
+        logger.warning("  export UPTRACE_DSN='https://<token>@api.uptrace.dev?grpc=4317'")
+        logger.warning("=" * 60)
         _initialized = True
         _enabled = False
         return False
     
     if not OTEL_AVAILABLE:
-        logger.warning("OpenTelemetry not available. Install with: pip install opentelemetry-api opentelemetry-sdk")
+        logger.error("=" * 60)
+        logger.error("OpenTelemetry not available!")
+        logger.error("Install with: pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp")
+        logger.error("=" * 60)
         _initialized = True
         _enabled = False
         return False
     
     if not dsn:
-        logger.warning("UPTRACE_DSN not set. Tracing will be disabled.")
+        logger.error("=" * 60)
+        logger.error("UPTRACE_DSN not set!")
+        logger.error("Set with: export UPTRACE_DSN='https://<token>@api.uptrace.dev?grpc=4317'")
+        logger.error("=" * 60)
         _initialized = True
         _enabled = False
         return False
     
     if not UPTRACE_AVAILABLE:
-        logger.warning("Uptrace not available. Install with: pip install uptrace")
+        logger.error("=" * 60)
+        logger.error("Uptrace not available!")
+        logger.error("Install with: pip install uptrace")
+        logger.error("=" * 60)
         _initialized = True
         _enabled = False
         return False
@@ -129,11 +146,20 @@ def init_tracing(
         
         _initialized = True
         _enabled = True
-        logger.info(f"Tracing initialized with Uptrace. Service: {service_name}")
+        logger.info("=" * 60)
+        logger.info(f"✅ Tracing initialized successfully!")
+        logger.info(f"   Service: {service_name}")
+        logger.info(f"   Version: {service_version}")
+        logger.info(f"   Environment: {deployment_environment}")
+        logger.info(f"   DSN: {dsn[:50]}...")
+        logger.info("=" * 60)
         return True
         
     except Exception as e:
-        logger.error(f"Failed to initialize tracing: {e}")
+        logger.error("=" * 60)
+        logger.error(f"❌ Failed to initialize tracing: {e}")
+        logger.error("   Check your UPTRACE_DSN and network connectivity")
+        logger.error("=" * 60, exc_info=True)
         _initialized = True
         _enabled = False
         return False

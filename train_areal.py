@@ -67,6 +67,7 @@ from areal.utils.stats_logger import StatsLogger
 # 项目 imports
 from cua_agent.areal_workflow import CUAEnvRolloutWorkflow
 from cua_agent.reward import cua_reward_fn
+from cua_agent.profiler import get_tracer, get_trace_url, trace_span
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -306,6 +307,11 @@ def main(args):
             else:
                 vllm_api_base = f"http://{first_addr}/v1"
         
+        # Check tracing status
+        from cua_agent.profiler import _enabled as tracing_enabled
+        enable_tracing = os.getenv("ENABLE_TRACING", "false").lower() == "true"
+        uptrace_dsn = os.getenv("UPTRACE_DSN", "")
+        
         print(f"\n{'='*60}")
         print(f"CUA GRPO Training - Actor Driven Environment")
         print(f"{'='*60}")
@@ -316,8 +322,20 @@ def main(args):
         print(f"  Context Window: {int(os.getenv('CUA_CONTEXT_WINDOW', '5'))}")
         print(f"  Trace Dir: {trace_dir}")
         print(f"  Total Steps: {max_steps}")
+        print(f"{'='*60}")
+        print(f"  Tracing Status:")
+        print(f"    ENABLE_TRACING: {enable_tracing}")
+        print(f"    UPTRACE_DSN: {'SET' if uptrace_dsn else 'NOT SET'}")
+        print(f"    Tracing Enabled: {tracing_enabled}")
+        if not tracing_enabled and enable_tracing:
+            print(f"    ⚠️  Tracing requested but not initialized! Check logs above.")
+        elif tracing_enabled:
+            print(f"    ✅ Tracing is ACTIVE")
         print(f"{'='*60}\n")
 
+    # Get tracer for training loop
+    tracer = get_tracer("train_areal")
+    
     for global_step in range(start_step, max_steps):
         epoch = global_step // steps_per_epoch
         step = global_step % steps_per_epoch
@@ -327,157 +345,231 @@ def main(args):
             epoch_step=step,
             steps_per_epoch=steps_per_epoch,
         )
-
-        with stats_tracker.record_timing("rollout"):
+        
+        # Start training step span
+        with tracer.start_as_current_span(
+            f"train.step:{global_step}",
+            attributes={
+                "training.global_step": global_step,
+                "training.epoch": epoch,
+                "training.epoch_step": step,
+                "training.steps_per_epoch": steps_per_epoch,
+                "training.progress_pct": (global_step + 1) / max_steps * 100,
+            }
+        ) as step_span:
+            # Log trace URL for first step
             if actual_rank == 0 and global_step == start_step:
-                logger = logging.getLogger(__name__)
-                logger.info(f"[Prepare Batch] Calling prepare_batch with workflow: {type(workflow).__name__}")
-                logger.info(f"[Prepare Batch] Workflow has GBOX_API_KEY: {bool(workflow.gbox_api_key)}")
-            
-            batch = actor.prepare_batch(
-                train_dataloader,
-                granularity=actor.config.group_size,
-                workflow=workflow,
-                should_accept_fn=lambda sample: True,
-            )
-            
-            if actual_rank == 0 and global_step == start_step:
-                logger = logging.getLogger(__name__)
-                logger.info(f"[Prepare Batch] Batch prepared, keys: {list(batch.keys()) if isinstance(batch, dict) else 'not a dict'}")
-                if isinstance(batch, dict) and "reward" in batch:
-                    rewards = batch.get("reward", [])
-                    logger.info(f"[Prepare Batch] Sample rewards: {rewards[:5] if len(rewards) > 5 else rewards}")
-
-        if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
-            with stats_tracker.record_timing("recompute_logp"):
-                logp = actor.compute_logp(batch)
-                batch["prox_logp"] = logp
-                log_gpu_stats("recompute logp")
-
-        if ref is not None:
-            with stats_tracker.record_timing("ref_logp"):
-                batch["ref_logp"] = ref.compute_logp(batch)
-                log_gpu_stats("ref logp")
-
-        with stats_tracker.record_timing("compute_advantage"):
-            actor.compute_advantages(batch)
-            log_gpu_stats("compute advantages")
-            
-            # Log group-wise statistics for GRPO
-            if actual_rank == 0 and isinstance(batch, dict):
-                # Extract group information from batch
-                rewards = batch.get("reward", [])
-                advantages = batch.get("advantage", [])
-                
-                if rewards and len(rewards) > 0:
-                    group_size = actor.config.group_size
-                    num_groups = len(rewards) // group_size if group_size > 0 else 1
-                    
+                trace_url = get_trace_url(step_span)
+                if trace_url:
                     logger = logging.getLogger(__name__)
-                    logger.info(f"[GRPO Groups] Total samples: {len(rewards)}, Group size: {group_size}, Num groups: {num_groups}")
+                    logger.info(f"[Trace] 🔍 Training Step {global_step}: {trace_url}")
+
+            # Rollout phase
+            with trace_span("train.rollout", tracer_name="train_areal") as rollout_span:
+                with stats_tracker.record_timing("rollout"):
+                    if actual_rank == 0 and global_step == start_step:
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"[Prepare Batch] Calling prepare_batch with workflow: {type(workflow).__name__}")
+                        logger.info(f"[Prepare Batch] Workflow has GBOX_API_KEY: {bool(workflow.gbox_api_key)}")
                     
-                    # Log each group's statistics
-                    for group_idx in range(num_groups):
-                        start_idx = group_idx * group_size
-                        end_idx = start_idx + group_size
-                        group_rewards = rewards[start_idx:end_idx]
-                        group_advantages = advantages[start_idx:end_idx] if advantages and len(advantages) >= end_idx else []
+                    batch = actor.prepare_batch(
+                        train_dataloader,
+                        granularity=actor.config.group_size,
+                        workflow=workflow,
+                        should_accept_fn=lambda sample: True,
+                    )
+                    
+                    # Record batch stats
+                    if isinstance(batch, dict):
+                        rollout_span.set_attribute("batch.size", len(batch.get("reward", [])))
+                        rollout_span.set_attribute("batch.group_size", actor.config.group_size)
+                        rewards = batch.get("reward", [])
+                        if rewards:
+                            rollout_span.set_attribute("batch.mean_reward", float(np.mean(rewards)))
+                            rollout_span.set_attribute("batch.min_reward", float(np.min(rewards)))
+                            rollout_span.set_attribute("batch.max_reward", float(np.max(rewards)))
+                    
+                    if actual_rank == 0 and global_step == start_step:
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"[Prepare Batch] Batch prepared, keys: {list(batch.keys()) if isinstance(batch, dict) else 'not a dict'}")
+                        if isinstance(batch, dict) and "reward" in batch:
+                            rewards = batch.get("reward", [])
+                            logger.info(f"[Prepare Batch] Sample rewards: {rewards[:5] if len(rewards) > 5 else rewards}")
+
+            # Recompute logprob
+            if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
+                with trace_span("train.recompute_logp", tracer_name="train_areal"):
+                    with stats_tracker.record_timing("recompute_logp"):
+                        logp = actor.compute_logp(batch)
+                        batch["prox_logp"] = logp
+                        log_gpu_stats("recompute logp")
+
+            # Reference logprob
+            if ref is not None:
+                with trace_span("train.ref_logp", tracer_name="train_areal"):
+                    with stats_tracker.record_timing("ref_logp"):
+                        batch["ref_logp"] = ref.compute_logp(batch)
+                        log_gpu_stats("ref logp")
+
+            # Compute advantages
+            with trace_span("train.compute_advantage", tracer_name="train_areal") as adv_span:
+                with stats_tracker.record_timing("compute_advantage"):
+                    actor.compute_advantages(batch)
+                    log_gpu_stats("compute advantages")
+                    
+                    # Record advantage stats
+                    if isinstance(batch, dict):
+                        advantages = batch.get("advantage", [])
+                        if advantages:
+                            adv_span.set_attribute("advantage.mean", float(np.mean(advantages)))
+                            adv_span.set_attribute("advantage.std", float(np.std(advantages)))
+                    
+                    # Log group-wise statistics for GRPO
+                    if actual_rank == 0 and isinstance(batch, dict):
+                        # Extract group information from batch
+                        rewards = batch.get("reward", [])
+                        advantages = batch.get("advantage", [])
                         
-                        if group_rewards:
-                            mean_reward = float(np.mean(group_rewards))
-                            std_reward = float(np.std(group_rewards))
-                            min_reward = float(np.min(group_rewards))
-                            max_reward = float(np.max(group_rewards))
+                        if rewards and len(rewards) > 0:
+                            group_size = actor.config.group_size
+                            num_groups = len(rewards) // group_size if group_size > 0 else 1
                             
-                            logger.info(
-                                f"[GRPO Group {group_idx}] "
-                                f"Rewards: {[f'{r:.3f}' for r in group_rewards]} | "
-                                f"Mean: {mean_reward:.3f} | Std: {std_reward:.3f} | "
-                                f"Range: [{min_reward:.3f}, {max_reward:.3f}]"
-                            )
+                            logger = logging.getLogger(__name__)
+                            logger.info(f"[GRPO Groups] Total samples: {len(rewards)}, Group size: {group_size}, Num groups: {num_groups}")
                             
-                            if group_advantages:
-                                mean_adv = float(np.mean(group_advantages))
-                                logger.info(
-                                    f"[GRPO Group {group_idx}] "
-                                    f"Advantages: {[f'{a:.3f}' for a in group_advantages]} | "
-                                    f"Mean: {mean_adv:.3f}"
-                                )
+                            # Log each group's statistics
+                            for group_idx in range(num_groups):
+                                start_idx = group_idx * group_size
+                                end_idx = start_idx + group_size
+                                group_rewards = rewards[start_idx:end_idx]
+                                group_advantages = advantages[start_idx:end_idx] if advantages and len(advantages) >= end_idx else []
+                                
+                                if group_rewards:
+                                    mean_reward = float(np.mean(group_rewards))
+                                    std_reward = float(np.std(group_rewards))
+                                    min_reward = float(np.min(group_rewards))
+                                    max_reward = float(np.max(group_rewards))
+                                    
+                                    logger.info(
+                                        f"[GRPO Group {group_idx}] "
+                                        f"Rewards: {[f'{r:.3f}' for r in group_rewards]} | "
+                                        f"Mean: {mean_reward:.3f} | Std: {std_reward:.3f} | "
+                                        f"Range: [{min_reward:.3f}, {max_reward:.3f}]"
+                                    )
+                                    
+                                    if group_advantages:
+                                        mean_adv = float(np.mean(group_advantages))
+                                        logger.info(
+                                            f"[GRPO Group {group_idx}] "
+                                            f"Advantages: {[f'{a:.3f}' for a in group_advantages]} | "
+                                            f"Mean: {mean_adv:.3f}"
+                                        )
 
-        with (
-            stats_tracker.record_timing("train_step"),
-            stats_tracker.scope("grpo_actor"),
-        ):
-            stats = actor.ppo_update(batch)
-            actor.step_lr_scheduler()
-            log_gpu_stats("ppo update")
+            # PPO update
+            with trace_span("train.ppo_update", tracer_name="train_areal") as ppo_span:
+                with (
+                    stats_tracker.record_timing("train_step"),
+                    stats_tracker.scope("grpo_actor"),
+                ):
+                    stats = actor.ppo_update(batch)
+                    actor.step_lr_scheduler()
+                    log_gpu_stats("ppo update")
+                    
+                    # Record training stats
+                    if isinstance(stats, dict):
+                        ppo_span.set_attribute("loss.pg", stats.get("grpo_actor/pg_loss", stats.get("pg_loss", 0.0)))
+                        ppo_span.set_attribute("loss.kl", stats.get("grpo_actor/kl", stats.get("kl", 0.0)))
+                        ppo_span.set_attribute("lr", stats.get("grpo_actor/lr", stats.get("lr", 0.0)))
+                        reward = stats.get("reward", stats.get("rollout/reward", 0.0))
+                        if isinstance(reward, (list, tuple)):
+                            reward = sum(reward) / len(reward) if reward else 0.0
+                        ppo_span.set_attribute("reward.mean", float(reward))
 
-        rollout.pause()
+            rollout.pause()
 
-        with stats_tracker.record_timing("update_weights"):
-            actor.update_weights(weight_update_meta)
-            actor.set_version(global_step + 1)
-            rollout.set_version(global_step + 1)
-            eval_rollout.set_version(global_step + 1)
+            # Update weights
+            with trace_span("train.update_weights", tracer_name="train_areal"):
+                with stats_tracker.record_timing("update_weights"):
+                    actor.update_weights(weight_update_meta)
+                    actor.set_version(global_step + 1)
+                    rollout.set_version(global_step + 1)
+                    eval_rollout.set_version(global_step + 1)
+                    step_span.set_attribute("model.version", global_step + 1)
 
-        with stats_tracker.record_timing("save"):
-            saver.save(actor, epoch, step, global_step, tokenizer=tokenizer)
+            # Save checkpoint
+            with trace_span("train.save", tracer_name="train_areal"):
+                with stats_tracker.record_timing("save"):
+                    saver.save(actor, epoch, step, global_step, tokenizer=tokenizer)
 
-        with stats_tracker.record_timing("checkpoint_for_recover"):
-            recover_handler.dump(
-                actor,
-                step_info,
-                saver,
-                evaluator,
-                stats_logger,
-                train_dataloader,
-                tokenizer=tokenizer,
-            )
+            # Checkpoint for recovery
+            with trace_span("train.checkpoint", tracer_name="train_areal"):
+                with stats_tracker.record_timing("checkpoint_for_recover"):
+                    recover_handler.dump(
+                        actor,
+                        step_info,
+                        saver,
+                        evaluator,
+                        stats_logger,
+                        train_dataloader,
+                        tokenizer=tokenizer,
+                    )
 
-        dist.barrier(device_ids=[actor.device.index])
-        current_platform.synchronize()
+            dist.barrier(device_ids=[actor.device.index])
+            current_platform.synchronize()
 
-        with stats_tracker.record_timing("eval"):
+            # Evaluation phase
+            with trace_span("eval.step", tracer_name="train_areal") as eval_span:
+                eval_span.set_attribute("eval.global_step", global_step)
+                eval_span.set_attribute("eval.epoch", epoch)
+                
+                def evaluate_fn():
+                    with trace_span("eval.collect", tracer_name="train_areal") as collect_span:
+                        if actor.is_data_parallel_head():
+                            cnt = 0
+                            for data in valid_dataloader:
+                                for item in data:
+                                    eval_rollout.submit(item, eval_workflow)
+                                    cnt += 1
+                            collect_span.set_attribute("eval.samples", cnt)
+                            eval_rollout.wait(cnt, timeout=None)
+                        dist.barrier(device_ids=[actor.device.index])
+                        current_platform.synchronize()
 
-            def evaluate_fn():
-                if actor.is_data_parallel_head():
-                    cnt = 0
-                    for data in valid_dataloader:
-                        for item in data:
-                            eval_rollout.submit(item, eval_workflow)
-                            cnt += 1
-                    eval_rollout.wait(cnt, timeout=None)
-                dist.barrier(device_ids=[actor.device.index])
-                current_platform.synchronize()
+                with stats_tracker.record_timing("eval"):
+                    evaluator.evaluate(
+                        evaluate_fn,
+                        epoch,
+                        step,
+                        global_step,
+                    )
 
-            evaluator.evaluate(
-                evaluate_fn,
-                epoch,
-                step,
-                global_step,
-            )
+            dist.barrier(device_ids=[actor.device.index])
+            current_platform.synchronize()
 
-        dist.barrier(device_ids=[actor.device.index])
-        current_platform.synchronize()
+            stats = actor.export_stats()
+            stats_logger.commit(epoch, step, global_step, stats)
+            
+            # Record final step stats
+            if isinstance(stats, dict):
+                step_span.set_attribute("final.reward", stats.get("reward", stats.get("rollout/reward", 0.0)))
+                step_span.set_attribute("final.pg_loss", stats.get("grpo_actor/pg_loss", 0.0))
+                step_span.set_attribute("final.kl", stats.get("grpo_actor/kl", 0.0))
 
-        stats = actor.export_stats()
-        stats_logger.commit(epoch, step, global_step, stats)
+            # Print training progress
+            if actual_rank == 0:
+                _print_training_progress(
+                    global_step=global_step,
+                    epoch=epoch,
+                    step=step,
+                    steps_per_epoch=steps_per_epoch,
+                    max_steps=max_steps,
+                    stats=stats,
+                )
 
-        # Print training progress
-        if actual_rank == 0:
-            _print_training_progress(
-                global_step=global_step,
-                epoch=epoch,
-                step=step,
-                steps_per_epoch=steps_per_epoch,
-                max_steps=max_steps,
-                stats=stats,
-            )
+            dist.barrier(device_ids=[actor.device.index])
+            current_platform.synchronize()
 
-        dist.barrier(device_ids=[actor.device.index])
-        current_platform.synchronize()
-
-        rollout.resume()
+            rollout.resume()
 
     stats_logger.close()
     eval_rollout.destroy()

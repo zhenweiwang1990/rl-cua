@@ -135,7 +135,7 @@ class EpisodeRunner:
             # Log trace URL for debugging
             trace_url = get_trace_url(rollout_span)
             if trace_url:
-                logger.info(f"[Trace] Rollout {rollout_id}: {trace_url}")
+                logger.info(f"[Trace] 🔍 Rollout {rollout_id}: {trace_url}")
             
             # Initialize logger
             rollout_logger = RolloutLogger(
