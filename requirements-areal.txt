@@ -16,6 +16,13 @@ tenacity>=9.0.0
 wandb>=0.18.0
 tqdm>=4.66.0
 
+# OpenTelemetry + Uptrace for profiling/tracing
+# See: https://uptrace.dev/get/opentelemetry-python
+uptrace>=1.22.0
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp>=1.20.0
+
 # GBox
 git+https://github.com/babelcloud/gbox-cua.git
 

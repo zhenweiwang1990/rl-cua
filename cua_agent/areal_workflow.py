@@ -11,56 +11,51 @@ Key Design:
    - Training tensor construction
    - Reward computation
 
+Architecture:
+- CUAEnvRolloutWorkflow: Main workflow class (handles GRPO parallel episodes)
+- EpisodeRunner: Runs single episodes (in episode_runner.py)
+- workflow_utils: Message building and logging utilities
+
 References:
 - https://github.com/inclusionAI/AReaL/blob/main/areal/workflow/vision_rlvr.py
 - https://github.com/inclusionAI/AReaL/blob/main/examples/search-agent/
 """
 
 import asyncio
-import base64
-import io
+import atexit
 import json
 import logging
 import os
-import uuid
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
-import aiofiles
-import aiofiles.os
-import colorama
 import torch
-from PIL import Image
 from transformers import AutoProcessor, PreTrainedTokenizerFast
 
 from areal.api.cli_args import GenerationHyperparameters
 from areal.api.engine_api import InferenceEngine
-from areal.api.io_struct import ModelRequest, ModelResponse
 from areal.api.workflow_api import RolloutWorkflow
-from areal.utils import stats_tracker
 from areal.utils.data import concat_padded_tensors
-from areal.utils.image import image2base64
-from areal.utils.perf_tracer import (
-    atrace_session_phase,
-    session_context,
-    trace_session,
-)
 
-# Import reusable components from gbox_cua
-from gbox_cua.gbox_client import GBoxClient
-from gbox_cua.agent import (
-    GBoxAgentCore,
-    RolloutLogger,
-    TurnLog,
-)
-from gbox_cua.prompts import create_system_prompt
 from gbox_cua.tools import get_tools_schema
 
 from cua_agent.tasks import CUATask, TaskCategory, TaskDifficulty
-from cua_agent.reward import validate_task_completion
+from cua_agent.episode_runner import EpisodeRunner
+from cua_agent.workflow_utils import create_empty_result
+from cua_agent.profiler import init_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
+
+# Initialize tracing at module load if ENABLE_TRACING is set
+_tracing_initialized = init_tracing(
+    service_name=os.getenv("OTEL_SERVICE_NAME", "cua-agent"),
+    service_version=os.getenv("OTEL_SERVICE_VERSION", "1.0.0"),
+    deployment_environment=os.getenv("DEPLOYMENT_ENVIRONMENT", "development"),
+)
+
+# Register shutdown handler
+if _tracing_initialized:
+    atexit.register(shutdown_tracing)
 
 
 class CUAEnvRolloutWorkflow(RolloutWorkflow):
@@ -76,9 +71,8 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
     7. Repeat until done or max_turns reached
     8. Compute final reward and return training tensors
 
-    Uses gbox_cua.agent components for:
-    - GBoxAgentCore: Action execution, tool call parsing
-    - RolloutLogger: Human-friendly logging
+    For GRPO training, multiple parallel episodes are run for each task
+    to enable group-wise comparison.
     """
 
     def __init__(
@@ -107,6 +101,7 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
                 - gbox_model: GBox model for coordinate generation
                 - max_turns: Maximum turns per episode
                 - context_window: Number of recent turns to keep
+                - trace_dir: Directory for saving screenshots
         """
         # Extract custom parameters
         self.gbox_api_key = kwargs.pop("gbox_api_key", None) or os.getenv("GBOX_API_KEY", "")
@@ -115,18 +110,17 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         self.context_window = kwargs.pop("context_window", None) or int(os.getenv("CUA_CONTEXT_WINDOW", "5"))
         self.trace_dir = kwargs.pop("trace_dir", None)
         
-        # Internal counters for tracking rollout context
-        self._rollout_counter = 0
+        # Internal counters
         self._group_counter = 0
 
-        # Load tokenizer if path provided
+        # Load tokenizer
         if isinstance(tokenizer, str):
             from areal.utils.hf_utils import load_hf_tokenizer
             self.tokenizer = load_hf_tokenizer(tokenizer)
         else:
             self.tokenizer = tokenizer
 
-        # Store processor for vision-language processing
+        # Store processor
         self.processor = processor
 
         # Initialize gconfig with stop tokens
@@ -141,7 +135,7 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
         # Get tools schema
         self.tools_schema = get_tools_schema()
 
-        # Create dump directory if needed
+        # Create directories
         if self.dump_dir and not os.path.exists(self.dump_dir):
             os.makedirs(self.dump_dir, exist_ok=True)
 
@@ -150,6 +144,20 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
                 "CUAEnvRolloutWorkflow initialized without GBOX_API_KEY; "
                 "environment interaction will not work."
             )
+
+        # Create episode runner
+        self.episode_runner = EpisodeRunner(
+            tokenizer=self.tokenizer,
+            processor=self.processor,
+            gconfig=self.gconfig,
+            gbox_api_key=self.gbox_api_key,
+            gbox_model=self.gbox_model,
+            max_turns=self.max_turns,
+            context_window=self.context_window,
+            dump_dir=self.dump_dir,
+            trace_dir=self.trace_dir,
+            rollout_stat_scope=self.rollout_stat_scope,
+        )
 
     def _build_task(self, data: dict[str, Any]) -> CUATask:
         """Build CUATask from input data."""
@@ -195,177 +203,6 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             expected_result=task_metadata.get("expected_result"),
         )
 
-    def _build_messages(
-        self,
-        system_prompt: str,
-        turn_history: list[dict],
-        current_screenshot_b64: str,
-        turn: int,
-    ) -> list[dict]:
-        """Build messages for model input with context window."""
-        messages = []
-
-        # 1. System prompt (always kept)
-        messages.append({
-            "role": "system",
-            "content": system_prompt,
-        })
-
-        # 2. Recent history (last context_window turns)
-        recent_history = turn_history[-self.context_window:]
-        for hist_item in recent_history:
-            if hist_item.get("assistant"):
-                messages.append(hist_item["assistant"])
-            if hist_item.get("tool_response"):
-                messages.append(hist_item["tool_response"])
-
-        # 3. Current turn user message with screenshot
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": current_screenshot_b64},
-                },
-                {
-                    "type": "text",
-                    "text": f"Turn {turn}/{self.max_turns}. Analyze the screenshot and take the next action to complete the task.",
-                },
-            ],
-        })
-
-        return messages
-
-    def _build_messages_for_vllm(
-        self,
-        system_prompt: str,
-        turn_history: list[dict],
-        turn: int,
-    ) -> list[dict]:
-        """Build messages for vLLM/processor input (Qwen-VL compatible)."""
-        messages = []
-
-        # 1. System prompt
-        messages.append({
-            "role": "system",
-            "content": system_prompt,
-        })
-
-        # 2. Recent history (text only for history)
-        recent_history = turn_history[-self.context_window:]
-        for hist_item in recent_history:
-            if hist_item.get("assistant"):
-                assistant = hist_item["assistant"]
-                content = assistant.get("content", "")
-                if content:
-                    messages.append({
-                        "role": "assistant",
-                        "content": content,
-                    })
-            if hist_item.get("tool_response"):
-                tool_resp = hist_item["tool_response"]
-                messages.append({
-                    "role": "user",
-                    "content": f"Tool result: {tool_resp.get('content', '')}",
-                })
-
-        # 3. Current turn user message with image placeholder
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image"},  # Qwen-VL format
-                {
-                    "type": "text",
-                    "text": f"Turn {turn}/{self.max_turns}. Analyze the screenshot and take the next action to complete the task.",
-                },
-            ],
-        })
-
-        return messages
-
-    @trace_session("reward")
-    async def _compute_final_reward(
-        self,
-        task: CUATask,
-        gbox: GBoxClient,
-        task_success: bool,
-    ) -> float:
-        """Compute final reward for the episode."""
-        # Try validation if defined
-        if task.validation_query and task.expected_result is not None:
-            try:
-                validated = await validate_task_completion(task, gbox)
-                return 1.0 if validated else 0.0
-            except Exception as e:
-                logger.warning(f"Validation failed, using agent report: {e}")
-
-        # Use agent-reported success
-        return 1.0 if task_success else 0.0
-
-    def _compute_turn_reward(
-        self,
-        turn: int,
-        action_type: str,
-        action_result: dict,
-        task: CUATask,
-        done: bool,
-        is_success: bool,
-    ) -> float:
-        """Compute process reward for a single turn.
-        
-        This is a placeholder for Process Reward Model (PRM) integration.
-        Currently returns 0 for intermediate turns (final reward assigned at episode end).
-        
-        Future improvements:
-        1. Integrate a trained PRM that evaluates action quality
-        2. Use heuristics based on action type and result
-        3. Add progress estimation towards task goal
-        
-        Args:
-            turn: Current turn number
-            action_type: Type of action taken (tap, swipe, etc.)
-            action_result: Result of action execution
-            task: The task being executed
-            done: Whether the episode is complete
-            is_success: Whether the task was completed successfully
-            
-        Returns:
-            Process reward for this turn (0.0 by default, customize for PRM)
-        """
-        # === PLACEHOLDER: Replace with actual PRM when available ===
-        
-        # Option 1: Zero intermediate rewards (current behavior)
-        # All credit assigned at episode end via final_reward
-        if not done:
-            return 0.0
-        
-        # Option 2 (example): Simple heuristic-based rewards
-        # Uncomment and customize as needed:
-        #
-        # # Reward for successful action execution
-        # if action_result.get("status") == "success":
-        #     base_reward = 0.05
-        # else:
-        #     base_reward = -0.02  # Small penalty for failed actions
-        #
-        # # Bonus for task-relevant actions
-        # task_keywords = task.description.lower().split()
-        # if any(kw in action_type.lower() for kw in ["tap", "click"]):
-        #     if any(kw in str(action_result).lower() for kw in task_keywords):
-        #         base_reward += 0.1  # Bonus for relevant action
-        #
-        # return base_reward
-        
-        # Option 3 (future): Call external PRM API
-        # return self.process_reward_model.score(
-        #     task=task,
-        #     turn=turn,
-        #     action_type=action_type,
-        #     action_result=action_result,
-        # )
-        
-        return 0.0
-
     async def arun_episode(
         self,
         engine: InferenceEngine,
@@ -375,24 +212,30 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
 
         This is the main entry point called by AReaL training loop.
         For GRPO, we run n_samples parallel episodes to enable group-wise comparison.
+        
+        Args:
+            engine: AReaL inference engine
+            data: Input data containing task information
+            
+        Returns:
+            Concatenated training tensors from all episodes
         """
         if not self.gbox_api_key:
             logger.warning("No GBOX_API_KEY, returning empty result")
-            return self._empty_result()
+            return create_empty_result()
 
         # Get n_samples from gconfig
         n_samples = getattr(self.gconfig, 'n_samples', 1) or 1
         
-        # Build task once (shared across all samples)
+        # Build task
         task = self._build_task(data)
         
-        # Extract training context for rollout_id generation
+        # Build training context
         try:
             version = engine.get_version()
         except Exception:
             version = 0
         
-        # Extract metadata
         task_metadata = data.get("task_metadata", {})
         if isinstance(task_metadata, str):
             try:
@@ -407,639 +250,44 @@ class CUAEnvRolloutWorkflow(RolloutWorkflow):
             "group_id": task_metadata.get("group_id", self._group_counter),
         }
         
-        # Increment group counter for next task
         self._group_counter += 1
         
+        # Run episodes
         if n_samples == 1:
-            # Single episode - run directly
-            return await self._run_single_episode(engine, task, sample_idx=0, training_context=training_context)
+            return await self.episode_runner.run(
+                engine, task, sample_idx=0, training_context=training_context
+            )
         
-        # Run n_samples independent episodes in parallel
+        # Run n_samples parallel episodes
         logger.info(f"[GRPO] Running {n_samples} parallel episodes for task {task.id}")
         
-        # Create tasks for parallel execution
         episode_tasks = [
-            self._run_single_episode(engine, task, sample_idx=i, training_context=training_context)
+            self.episode_runner.run(engine, task, sample_idx=i, training_context=training_context)
             for i in range(n_samples)
         ]
         
-        # Run all episodes in parallel
         episode_results = await asyncio.gather(*episode_tasks, return_exceptions=True)
         
-        # Collect successful results
+        # Collect results
         valid_results = []
         for i, result in enumerate(episode_results):
             if isinstance(result, Exception):
                 logger.warning(f"[GRPO] Episode {i} for task {task.id} failed: {result}")
-                # Add empty result to maintain batch size
-                valid_results.append(self._empty_result())
+                valid_results.append(create_empty_result())
             elif result is not None and "input_ids" in result and result["input_ids"].numel() > 0:
                 valid_results.append(result)
             else:
                 logger.warning(f"[GRPO] Episode {i} for task {task.id} returned empty result")
-                valid_results.append(self._empty_result())
+                valid_results.append(create_empty_result())
         
-        # Concatenate all episode results
         if not valid_results:
-            return self._empty_result()
+            return create_empty_result()
         
-        # Filter out truly empty results for concatenation
         non_empty_results = [r for r in valid_results if r["input_ids"].numel() > 0]
         if not non_empty_results:
-            return self._empty_result()
+            return create_empty_result()
         
         return concat_padded_tensors(non_empty_results)
-
-    async def _run_single_episode(
-        self,
-        engine: InferenceEngine,
-        task: CUATask,
-        sample_idx: int = 0,
-        training_context: dict | None = None,
-    ) -> dict[str, torch.Tensor]:
-        """Run a single CUA episode with multi-turn environment interaction.
-        
-        Args:
-            engine: AReaL inference engine
-            task: The CUA task to execute
-            sample_idx: Index of this sample (for GRPO grouping)
-            training_context: Training context info (version, epoch, global_step, etc.)
-            
-        Returns:
-            Training tensors for this episode
-        """
-        training_context = training_context or {}
-        
-        # Build comprehensive rollout_id with training context
-        # Format: task_id_step{step}_g{group}_r{rollout}_{timestamp}
-        # This ensures unique IDs and prevents overwriting of logs/traces
-        parts = [task.id]
-        
-        # Add global_step or version
-        global_step = training_context.get("global_step")
-        version = training_context.get("version", 0)
-        if global_step is not None:
-            parts.append(f"s{global_step:05d}")
-        elif version > 0:
-            parts.append(f"v{version:04d}")
-        
-        # Add epoch if available
-        epoch = training_context.get("epoch")
-        if epoch is not None:
-            parts.append(f"e{epoch:03d}")
-        
-        # Add group and sample indices
-        group_id = training_context.get("group_id", 0)
-        parts.append(f"g{group_id:02d}")
-        parts.append(f"r{sample_idx:02d}")
-        
-        # Add timestamp for additional uniqueness (milliseconds precision)
-        parts.append(datetime.now().strftime("%H%M%S_%f")[:-3])
-        
-        rollout_id = "_".join(parts)
-
-        # Initialize per-rollout logger (using gbox_cua.agent.RolloutLogger)
-        rollout_logger = RolloutLogger(
-            rollout_id=rollout_id,
-            task_id=task.id,
-            task_description=task.description,
-        )
-        rollout_logger.set_model_info(
-            model_name=str(self.tokenizer.name_or_path if hasattr(self.tokenizer, 'name_or_path') else "unknown"),
-            provider="areal",
-        )
-
-        # Create GBox client - each episode gets its own environment
-        gbox = GBoxClient(
-            api_key=self.gbox_api_key,
-            model=self.gbox_model,
-            box_type="android",
-            timeout="60s",
-            wait=True,
-            expires_in="15m",
-        )
-
-        # Create agent core for action execution
-        agent_core = GBoxAgentCore(
-            gbox_client=gbox,
-            max_turns=self.max_turns,
-            context_window=self.context_window,
-        )
-
-        # Track episode-level data for training
-        # Instead of per-turn results, we accumulate all output tokens into one episode
-        episode_output_tokens = []  # All output tokens across turns
-        episode_output_logprobs = []  # Corresponding logprobs
-        episode_output_versions = []  # Version tracking
-        episode_turn_rewards = []  # Per-turn process rewards (for future PRM support)
-        episode_token_boundaries = []  # Track where each turn's tokens start/end
-        turn_history = []
-        task_success = False
-        version = 0
-
-        try:
-            # Create box
-            box_create_start = datetime.now()
-            await gbox.create_box("android")
-            await asyncio.sleep(2.0)  # Wait for box to be ready
-            box_create_time = (datetime.now() - box_create_start).total_seconds()
-            rollout_logger.set_box_info(gbox.box_id or "", "android", box_create_time)
-
-            # Get engine version for tracking
-            version = engine.get_version()
-
-            # Build system prompt
-            system_prompt = create_system_prompt(
-                task_description=task.description,
-                max_turns=self.max_turns,
-            )
-
-            # Setup trace directory for saving screenshots
-            trace_path = None
-            if self.trace_dir:
-                trace_path = Path(self.trace_dir) / task.id / rollout_id
-                trace_path.mkdir(parents=True, exist_ok=True)
-                
-                # Save initial screenshot (turn 0)
-                try:
-                    initial_screenshot_bytes, _ = await gbox.take_screenshot()
-                    initial_screenshot_path = trace_path / "turn_0_initial.png"
-                    initial_screenshot_path.write_bytes(initial_screenshot_bytes)
-                    logger.info(f"Saved initial screenshot to {initial_screenshot_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to save initial screenshot: {e}")
-
-            # Main interaction loop
-            for turn in range(1, self.max_turns + 1):
-                turn_log = rollout_logger.start_turn(turn, self.max_turns)
-
-                # 1. Take screenshot
-                await asyncio.sleep(0.3)
-                screenshot_start = datetime.now()
-                screenshot_bytes, screenshot_uri = await gbox.take_screenshot()
-                turn_log.screenshot_time = (datetime.now() - screenshot_start).total_seconds()
-                turn_log.screenshot_bytes = len(screenshot_bytes)
-                turn_log.screenshot_size_kb = len(screenshot_bytes) / 1024
-
-                # Save screenshot to trace directory
-                if trace_path:
-                    try:
-                        screenshot_path = trace_path / f"turn_{turn}.png"
-                        screenshot_path.write_bytes(screenshot_bytes)
-                    except Exception as e:
-                        logger.warning(f"[Turn {turn}] Failed to save screenshot: {e}")
-
-                screenshot_b64 = f"data:image/png;base64,{base64.b64encode(screenshot_bytes).decode()}"
-
-                # Get image size
-                try:
-                    pil_image = Image.open(io.BytesIO(screenshot_bytes))
-                    turn_log.screenshot_size = pil_image.size
-                except Exception:
-                    pil_image = None
-
-                # 2. Build messages
-                messages = self._build_messages(
-                    system_prompt=system_prompt,
-                    turn_history=turn_history,
-                    current_screenshot_b64=screenshot_b64,
-                    turn=turn,
-                )
-
-                # 3. Process with processor for vision-language input
-                if pil_image is None:
-                    pil_image = Image.open(io.BytesIO(screenshot_bytes))
-
-                messages_for_vllm = self._build_messages_for_vllm(
-                    system_prompt=system_prompt,
-                    turn_history=turn_history,
-                    turn=turn,
-                )
-
-                # Process input
-                if self.processor is not None:
-                    try:
-                        processed = self.processor(
-                            images=[pil_image],
-                            text=messages_for_vllm,
-                            padding=False,
-                            return_tensors="pt",
-                        )
-                    except TypeError:
-                        processed = self.processor.apply_chat_template(
-                            messages_for_vllm,
-                            add_generation_prompt=True,
-                            tokenize=True,
-                            return_dict=True,
-                            return_tensors="pt",
-                        )
-                    input_ids = processed["input_ids"].tolist()[0]
-                    multi_modal_data = {
-                        "pixel_values": processed.get("pixel_values"),
-                    }
-                    if "image_grid_thw" in processed:
-                        multi_modal_data["image_grid_thw"] = processed["image_grid_thw"]
-                else:
-                    input_ids = self.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=True,
-                    )
-                    input_ids = list(input_ids)
-                    multi_modal_data = None
-
-                turn_log.prompt_tokens = len(input_ids)
-
-                # 4. Build ModelRequest
-                byte_images = image2base64([pil_image])
-                req = ModelRequest(
-                    rid=uuid.uuid4().hex,
-                    input_ids=input_ids,
-                    image_data=byte_images,
-                    vision_msg_vllm=[messages],
-                    gconfig=self.gconfig.new(n_samples=1),
-                    tokenizer=self.tokenizer,
-                    processor=self.processor,
-                )
-
-                # 5. Generate response
-                vlm_start = datetime.now()
-                async with atrace_session_phase("generate"):
-                    resp = await engine.agenerate(req)
-                turn_log.vlm_time = (datetime.now() - vlm_start).total_seconds()
-
-                # Decode response
-                response_text = self.tokenizer.decode(resp.output_tokens)
-                turn_log.raw_output = response_text
-                turn_log.completion_tokens = resp.output_len
-                turn_log.total_tokens = turn_log.prompt_tokens + turn_log.completion_tokens
-
-                # Extract thinking and content
-                thinking, content = GBoxAgentCore.extract_thinking_and_content(response_text)
-                turn_log.thinking = thinking
-                turn_log.content = content
-
-                # 6. Parse tool call (using GBoxAgentCore)
-                tool_call = GBoxAgentCore.parse_tool_call_from_response(response_text, turn)
-                func_name = tool_call.get("function", {}).get("name", "")
-                func_args_str = tool_call.get("function", {}).get("arguments", "{}")
-
-                try:
-                    func_args = json.loads(func_args_str) if isinstance(func_args_str, str) else func_args_str
-                except json.JSONDecodeError:
-                    func_args = {}
-
-                turn_log.tool_calls = [tool_call]
-                turn_log.action_type = func_name
-                turn_log.action_params = func_args
-
-                # 7. Execute action (using GBoxAgentCore)
-                action_start = datetime.now()
-                await asyncio.sleep(0.5)
-                try:
-                    action_result, done, is_success = await agent_core.execute_tool_call(
-                        tool_call, screenshot_uri
-                    )
-                    turn_log.action_result = action_result
-                    turn_log.action_success = action_result.get("status") == "success" or is_success
-                except Exception as e:
-                    action_result = {"status": "error", "message": str(e)}
-                    turn_log.action_error = str(e)
-                    done = False
-                    is_success = False
-
-                turn_log.action_time = (datetime.now() - action_start).total_seconds()
-                
-                # Update task completion in turn log
-                if done:
-                    turn_log.task_completed = True
-                    turn_log.task_success = is_success
-                    turn_log.task_message = action_result.get("message", "")
-
-                rollout_logger.end_turn()
-
-                # 8. Accumulate output tokens for episode-level GRPO
-                # Only keep model's output tokens (not prompt), so each episode = 1 sample
-                turn_start_idx = len(episode_output_tokens)
-                episode_output_tokens.extend(resp.output_tokens)
-                episode_output_logprobs.extend(resp.output_logprobs)
-                episode_output_versions.extend(resp.output_versions)
-                turn_end_idx = len(episode_output_tokens)
-                
-                # Track turn boundaries for process reward assignment
-                episode_token_boundaries.append((turn_start_idx, turn_end_idx))
-                
-                # Compute process reward for this turn (placeholder for PRM)
-                # TODO: Replace with actual Process Reward Model when available
-                turn_reward = self._compute_turn_reward(
-                    turn=turn,
-                    action_type=func_name,
-                    action_result=action_result,
-                    task=task,
-                    done=done,
-                    is_success=is_success,
-                )
-                episode_turn_rewards.append(turn_reward)
-
-                # 9. Update turn history for context window
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": response_text,
-                    "tool_calls": [tool_call],
-                }
-                tool_response_msg = {
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id", f"call_{turn}"),
-                    "content": json.dumps(action_result),
-                }
-                turn_history.append({
-                    "assistant": assistant_msg,
-                    "tool_response": tool_response_msg,
-                })
-
-                # 10. Check if done
-                if done:
-                    task_success = is_success
-                    break
-
-            # Compute final reward
-            final_reward = await self._compute_final_reward(task, gbox, task_success)
-
-            # Track stats
-            stats_tracker.get(self.rollout_stat_scope).scalar(reward=final_reward)
-
-            # Set completion in logger
-            rollout_logger.set_final_result(
-                success=task_success,
-                message="Task completed" if task_success else "Task failed",
-                total_turns=len(turn_history),
-                max_turns=self.max_turns,
-                reward=final_reward,
-            )
-
-        except Exception as e:
-            rollout_logger.set_completion(reward=0.0, success=False, error=str(e))
-            logger.error(f"[CUAEnvRollout] Task {task.id} failed: {e}", exc_info=True)
-            if not episode_output_tokens:
-                # Print rollout log directly to stdout for visibility
-                self._print_rollout_summary(rollout_logger, task)
-                return self._empty_result()
-            # If we have some tokens, set final_reward to 0 and continue
-            final_reward = 0.0
-
-        finally:
-            # Cleanup
-            try:
-                await gbox.terminate_box()
-            except Exception as e:
-                logger.warning(f"Failed to terminate box: {e}")
-
-            # Print rollout log directly to stdout for visibility in Docker
-            self._print_rollout_summary(rollout_logger, task)
-
-        # Dump traces if configured
-        if self.dump_dir and episode_output_tokens:
-            await self._dump_trace(
-                version=version,
-                task_id=task.id,
-                turn_history=turn_history,
-                final_reward=final_reward if 'final_reward' in locals() else 0.0,
-            )
-
-        # Build episode-level result (one sample per episode for GRPO)
-        if not episode_output_tokens:
-            return self._empty_result()
-
-        episode_len = len(episode_output_tokens)
-        
-        # Build per-token rewards with process reward support
-        # Each token gets the reward of its corresponding turn
-        # Final reward is added to the last turn's tokens
-        token_rewards = torch.zeros(episode_len, dtype=torch.float32)
-        
-        for turn_idx, (start_idx, end_idx) in enumerate(episode_token_boundaries):
-            turn_reward = episode_turn_rewards[turn_idx] if turn_idx < len(episode_turn_rewards) else 0.0
-            
-            # Assign turn's process reward to all tokens in that turn
-            # (or just the last token of the turn - see option below)
-            if end_idx > start_idx:
-                # Option A: Assign to last token of turn only (recommended for credit assignment)
-                token_rewards[end_idx - 1] = turn_reward
-                
-                # Option B: Distribute across all tokens in turn (uncomment if preferred)
-                # token_rewards[start_idx:end_idx] = turn_reward / (end_idx - start_idx)
-        
-        # Add final outcome reward to the last token of the episode
-        # This is the main signal for episode-level success/failure
-        if episode_len > 0:
-            token_rewards[-1] += final_reward
-        
-        # Total episode reward for GRPO advantage computation
-        total_episode_reward = sum(episode_turn_rewards) + final_reward
-        
-        # Create single episode result with all output tokens
-        # This ensures each episode = 1 sample for GRPO group comparison
-        episode_result = {
-            # Only output tokens (no prompt) - each episode is one sample
-            "input_ids": torch.tensor(episode_output_tokens, dtype=torch.int32).unsqueeze(0),
-            # All output tokens contribute to loss
-            "loss_mask": torch.ones(episode_len, dtype=torch.int32).unsqueeze(0),
-            # Logprobs for all output tokens
-            "logprobs": torch.tensor(episode_output_logprobs, dtype=torch.float32).unsqueeze(0),
-            # Version tracking
-            "versions": torch.tensor(episode_output_versions, dtype=torch.int32).unsqueeze(0),
-            # Attention mask
-            "attention_mask": torch.ones(episode_len, dtype=torch.bool).unsqueeze(0),
-            # Per-token rewards (for dense reward training)
-            "token_rewards": token_rewards.unsqueeze(0),
-            # Total episode reward (for GRPO advantage normalization)
-            "rewards": torch.tensor([total_episode_reward], dtype=torch.float32),
-        }
-
-        return episode_result
-
-    def _print_rollout_summary(self, rollout_logger: RolloutLogger, task: CUATask):
-        """Print detailed rollout execution log to stdout.
-        
-        Uses print() directly to ensure visibility in Docker containers.
-        Prints both a summary line and detailed per-turn execution records.
-        """
-        duration = rollout_logger.end_time - rollout_logger.start_time if rollout_logger.end_time else 0
-        
-        # Status indicators
-        if rollout_logger.final_success:
-            status = "✅ SUCCESS"
-            status_color = "\033[92m"  # Green
-        else:
-            status = "❌ FAILED"
-            status_color = "\033[91m"  # Red
-        reset = "\033[0m"
-        
-        # Print summary line
-        summary_parts = [
-            f"[Rollout] {task.id}",
-            f"{status_color}{status}{reset}",
-            f"Turns: {rollout_logger.total_turns}/{rollout_logger.max_turns}",
-            f"Reward: {rollout_logger.final_reward:.2f}",
-            f"Time: {duration:.1f}s",
-            f"Tokens: {rollout_logger.total_model_tokens}",
-        ]
-        print(" | ".join(summary_parts), flush=True)
-        print("", flush=True)  # Empty line for readability
-        
-        # Try to get detailed log using format_log() method
-        try:
-            detailed_log = rollout_logger.format_log()
-            if detailed_log:
-                # Print detailed log with indentation
-                for line in detailed_log.split('\n'):
-                    if line.strip():  # Skip empty lines
-                        print(f"  {line}", flush=True)
-                print("", flush=True)  # Empty line after detailed log
-        except (AttributeError, TypeError):
-            # If format_log() doesn't exist or fails, try manual formatting
-            try:
-                # Try to access turns attribute directly
-                if hasattr(rollout_logger, 'turns') and rollout_logger.turns:
-                    for turn_idx, turn_log in enumerate(rollout_logger.turns, 1):
-                        self._print_turn_details(turn_log, turn_idx)
-                    print("", flush=True)
-            except (AttributeError, TypeError):
-                # Fallback: try to get formatted log from format method
-                try:
-                    if hasattr(rollout_logger, 'format'):
-                        formatted = rollout_logger.format()
-                        if formatted:
-                            for line in formatted.split('\n'):
-                                if line.strip():
-                                    print(f"  {line}", flush=True)
-                            print("", flush=True)
-                except (AttributeError, TypeError):
-                    pass  # If all methods fail, just print summary
-        
-        # Print errors if any
-        if hasattr(rollout_logger, 'errors') and rollout_logger.errors:
-            print(f"  Errors ({len(rollout_logger.errors)}):", flush=True)
-            for error in rollout_logger.errors[-5:]:  # Last 5 errors
-                error_msg = str(error)[:200]  # Truncate long errors
-                print(f"    └─ {error_msg}", flush=True)
-            print("", flush=True)
-        
-        # Optionally save full log to file if dump_dir is configured
-        if self.dump_dir:
-            try:
-                log_path = os.path.join(self.dump_dir, "rollout_logs", f"{task.id}.log")
-                os.makedirs(os.path.dirname(log_path), exist_ok=True)
-                with open(log_path, "w") as f:
-                    try:
-                        f.write(rollout_logger.format_log())
-                    except (AttributeError, TypeError):
-                        # Fallback: write what we can
-                        f.write(f"Task: {task.id}\n")
-                        f.write(f"Success: {rollout_logger.final_success}\n")
-                        f.write(f"Reward: {rollout_logger.final_reward}\n")
-                        f.write(f"Turns: {rollout_logger.total_turns}/{rollout_logger.max_turns}\n")
-            except Exception:
-                pass  # Silently ignore log file errors
-    
-    def _print_turn_details(self, turn_log, turn_idx: int):
-        """Print detailed information for a single turn."""
-        print(f"  Turn {turn_idx}:", flush=True)
-        
-        # Action information
-        if hasattr(turn_log, 'action_type') and turn_log.action_type:
-            action_params = ""
-            if hasattr(turn_log, 'action_params') and turn_log.action_params:
-                # Format parameters nicely
-                params_str = json.dumps(turn_log.action_params, ensure_ascii=False)
-                if len(params_str) > 100:
-                    params_str = params_str[:97] + "..."
-                action_params = f" ({params_str})"
-            print(f"    Action: {turn_log.action_type}{action_params}", flush=True)
-        
-        # Action result
-        if hasattr(turn_log, 'action_result') and turn_log.action_result:
-            result_status = "unknown"
-            result_msg = ""
-            if isinstance(turn_log.action_result, dict):
-                result_status = turn_log.action_result.get("status", "unknown")
-                result_msg = turn_log.action_result.get("message", "")
-            else:
-                result_status = str(turn_log.action_result)[:50]
-            
-            success_marker = "✓" if hasattr(turn_log, 'action_success') and turn_log.action_success else "✗"
-            print(f"    Result: {success_marker} {result_status}", flush=True)
-            if result_msg and len(result_msg) <= 150:
-                print(f"      {result_msg}", flush=True)
-        
-        # Thinking and content (if available)
-        if hasattr(turn_log, 'thinking') and turn_log.thinking:
-            thinking_preview = turn_log.thinking[:150] + "..." if len(turn_log.thinking) > 150 else turn_log.thinking
-            print(f"    Thinking: {thinking_preview}", flush=True)
-        
-        # Token usage
-        if hasattr(turn_log, 'total_tokens'):
-            tokens_info = f"Tokens: {turn_log.total_tokens}"
-            if hasattr(turn_log, 'prompt_tokens') and hasattr(turn_log, 'completion_tokens'):
-                tokens_info += f" (prompt: {turn_log.prompt_tokens}, completion: {turn_log.completion_tokens})"
-            print(f"    {tokens_info}", flush=True)
-        
-        # Timing information
-        timing_parts = []
-        if hasattr(turn_log, 'vlm_time') and turn_log.vlm_time:
-            timing_parts.append(f"VLM: {turn_log.vlm_time:.2f}s")
-        if hasattr(turn_log, 'action_time') and turn_log.action_time:
-            timing_parts.append(f"Action: {turn_log.action_time:.2f}s")
-        if hasattr(turn_log, 'screenshot_time') and turn_log.screenshot_time:
-            timing_parts.append(f"Screenshot: {turn_log.screenshot_time:.2f}s")
-        if timing_parts:
-            print(f"    Timing: {' | '.join(timing_parts)}", flush=True)
-        
-        # Task completion (if this turn completed the task)
-        if hasattr(turn_log, 'task_completed') and turn_log.task_completed:
-            success_msg = "successfully" if (hasattr(turn_log, 'task_success') and turn_log.task_success) else "unsuccessfully"
-            print(f"    Task completed {success_msg}", flush=True)
-            if hasattr(turn_log, 'task_message') and turn_log.task_message:
-                print(f"      {turn_log.task_message}", flush=True)
-        
-        # Errors
-        if hasattr(turn_log, 'action_error') and turn_log.action_error:
-            print(f"    Error: {turn_log.action_error[:150]}", flush=True)
-        
-        print("", flush=True)  # Empty line between turns
-
-    def _empty_result(self) -> dict[str, torch.Tensor]:
-        """Return empty result tensor dict."""
-        return {
-            "input_ids": torch.tensor([[]], dtype=torch.int32),
-            "loss_mask": torch.tensor([[]], dtype=torch.int32),
-            "logprobs": torch.tensor([[]], dtype=torch.float32),
-            "versions": torch.tensor([[]], dtype=torch.int32),
-            "attention_mask": torch.tensor([[]], dtype=torch.bool),
-            "rewards": torch.tensor([0.0], dtype=torch.float32),
-        }
-
-    async def _dump_trace(
-        self,
-        version: int,
-        task_id: str,
-        turn_history: list[dict],
-        final_reward: float,
-    ):
-        """Dump rollout trace to file."""
-        dump_path = os.path.join(self.dump_dir, str(version))
-        await aiofiles.os.makedirs(dump_path, exist_ok=True)
-
-        file_path = os.path.join(dump_path, f"{task_id}.txt")
-        async with aiofiles.open(file_path, "a") as f:
-            for i, turn in enumerate(turn_history):
-                assistant = turn.get("assistant", {})
-                response = assistant.get("content", "")
-                info = "\n".join([
-                    f"idx: {i + 1} / {len(turn_history)}, reward: {final_reward if i == len(turn_history) - 1 else 0.0}",
-                    f"response: {colorama.Fore.YELLOW}{response[:500]}{colorama.Style.RESET_ALL}",
-                ])
-                await f.write(info + "\n\n")
 
 
 __all__ = ["CUAEnvRolloutWorkflow"]
